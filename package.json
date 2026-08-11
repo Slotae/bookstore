@@ -1,0 +1,15 @@
+{
+  "name": "bookstore-management",
+  "version": "2.0.0",
+  "description": "Bookstore Management System - Node.js + MSSQL",
+  "main": "server.js",
+  "scripts": {
+    "prestart": "node scripts/kill-port.js",
+    "start": "node server.js",
+    "predev": "node scripts/kill-port.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "mssql": "^11.0.1"
+  }
+}
