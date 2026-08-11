@@ -29,6 +29,21 @@ function loadEnv() {
 }
 loadEnv();
 
+// ── AUTO-OPEN BROWSER ─────────────────────────────────────────────
+// เปิดเว็บเบราว์เซอร์อัตโนมัติเมื่อ server พร้อมใช้งาน (ใช้คำสั่งของแต่ละ OS โดยตรง ไม่ต้องลง package เพิ่ม)
+function openBrowser(url) {
+  const { exec } = require("node:child_process");
+  const platform = process.platform;
+  let cmd;
+  if (platform === "win32")      cmd = `start "" "${url}"`;
+  else if (platform === "darwin") cmd = `open "${url}"`;
+  else                             cmd = `xdg-open "${url}"`;
+
+  exec(cmd, (err) => {
+    if (err) console.log(`  ℹ️  ไม่สามารถเปิดเบราว์เซอร์อัตโนมัติได้ กรุณาเปิดเองที่ ${url}`);
+  });
+}
+
 // ── PORT FINDER ────────────────────────────────────────────────────
 function isPortFree(port) {
   return new Promise(resolve => {
@@ -1664,6 +1679,11 @@ function serveStatic(req, res, url) {
       console.log(`  User     : ${dbConfig.user}`);
       console.log("  Accounts : admin/admin1234  staff1/staff1234  delivery1/delivery1234");
       console.log("═".repeat(58));
+
+      // เปิดหน้าเว็บให้อัตโนมัติ (ปิดได้ด้วย NO_OPEN=1 npm start)
+      if (!process.env.NO_OPEN) {
+        openBrowser(`http://localhost:${PORT}`);
+      }
     });
   } catch(err) {
     console.error("❌ เริ่มต้นระบบล้มเหลว:", err.message);

@@ -2438,6 +2438,11 @@ async function doCheckout() {
     // เคลียร์ตะกร้าและฟอร์ม
     cart = [];
     renderCart();
+    // FIX: โหลดหนังสือใหม่จาก server เพื่ออัปเดตจำนวนสต๊อกในหน้าร้าน
+    // (เดิมใช้ shopBooks ตัวเก่าซึ่งยังเป็นสต๊อกก่อนสั่งซื้อ ทำให้ต้องกดรีเฟรชหน้าเว็บเองถึงจะเห็นสต๊อกที่อัปเดต)
+    try {
+      shopBooks = await api('/api/books');
+    } catch (e) { /* ถ้าโหลดไม่สำเร็จ ใช้ค่าเดิมไปก่อน ไม่บล็อกการแสดงผลสำเร็จของออเดอร์ */ }
     renderShopCatalog(shopBooks);
     checkoutSlipBase64 = null;
     document.getElementById('checkoutSlipFile').value = '';
