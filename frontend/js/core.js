@@ -1,0 +1,190 @@
+// ================================================================
+// CORE — shared state, API, tabs, loading, and render helpers
+// ================================================================
+const money = new Intl.NumberFormat('th-TH',{style:'currency',currency:'THB'});
+let TOKEN = localStorage.getItem('bms_token') || '';
+let ME    = JSON.parse(localStorage.getItem('bms_me') || 'null');
+const state = {customers:[],books:[],orders:[],payments:[],shipments:[],users:[],dashboard:null,
+  // ── ผลลัพธ์สดจาก Query Library (Query 1,2,3,7,8) — null = ยังไม่ได้กรอง/รอผลจากเซิร์ฟเวอร์ ─
+  live: { bookPriceISBN:null, bookKeywordISBN:null, bookBestNames:null, customerPhoneNames:null, customerFreqNames:null }
+};
+function debounce(fn, ms){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); }; }
+
+// ══ API ═════════════════════════════════════════════════════════════
+async function api(path,opts={}){
+  const res=await fetch(path,{headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},...opts});
+  if(res.status===401){doLogout();throw new Error('กรุณาเข้าสู่ระบบใหม่')}
+  const data=await res.json();
+  if(!res.ok) throw new Error(data.error||'เกิดข้อผิดพลาด');
+  return data;
+}
+
+function toast(msg,type='success'){
+  const el=document.getElementById('toast');
+  el.textContent=msg; el.className=`show ${type}`;
+  clearTimeout(el._t); el._t=setTimeout(()=>el.classList.remove('show'),3200);
+}
+
+// ══ กันการกดปุ่มส่งฟอร์มซ้ำ (double-submit) ═══════════════════════════
+// ล็อกปุ่ม submit ของฟอร์มระหว่างรอ API ตอบกลับ แล้วคืนสถานะเดิมให้เสมอ
+// ไม่ว่าจะสำเร็จหรือ error กันปัญหาผู้ใช้กดรัว ๆ แล้วเกิดรายการซ้ำ
+async function withSubmitLock(form, task){
+  const btn = form.querySelector('button[type="submit"]');
+  const original = btn ? btn.innerHTML : null;
+  const LOADING_MARK = 'btn-spin';
+  if(btn){
+    btn.disabled = true;
+    btn.innerHTML = `<span class="${LOADING_MARK}"></span>กำลังบันทึก…`;
+  }
+  try{
+    await task();
+  } finally {
+    if(btn){
+      btn.disabled = false;
+      // ถ้า task ระหว่างทางเปลี่ยน label ปุ่มเอง (เช่น cancelEditBook สลับโหมด
+      // แก้ไข/เพิ่มใหม่) ให้เคารพค่านั้น ไม่ทับกลับเป็นค่าก่อนกดปุ่ม
+      if(btn.innerHTML.includes(LOADING_MARK)) btn.innerHTML = original;
+    }
+  }
+}
+
+// เวอร์ชันสำหรับปุ่มที่ไม่ได้อยู่ใน <form> (เช่น เข้าสู่ระบบ/สมัครสมาชิก)
+// ใช้ id ปุ่มตรงๆ แทนการหา button[type=submit] ในฟอร์ม
+async function withBtnLock(btnId, loadingText, task){
+  const btn = document.getElementById(btnId);
+  const original = btn ? btn.innerHTML : null;
+  if(btn){ btn.disabled = true; btn.innerHTML = `<span class="btn-spin"></span>${loadingText}`; }
+  try{
+    await task();
+  } finally {
+    if(btn){ btn.disabled = false; btn.innerHTML = original; }
+  }
+}
+
+// ══ TABS ════════════════════════════════════════════════════════════
+document.querySelectorAll('.tab').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.tab,.view').forEach(el=>el.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(btn.dataset.view)?.classList.add('active');
+    if(btn.dataset.view==='reports') loadReportsTab();
+  });
+});
+
+// ══ LOAD ALL ════════════════════════════════════════════════════════
+async function loadAll(){
+  try{
+    if(ME?.role==='ลูกค้า'){
+      // ลูกค้า: โหลดเฉพาะคำสั่งซื้อของตัวเอง + ร้านหนังสือ
+      const orders=await api('/api/my/orders');
+      renderMyOrders(orders);
+      // dashboard สำหรับลูกค้า — สรุปการสั่งซื้อของตัวเอง แทนแผงที่ต้องใช้สิทธิ์แอดมิน
+      document.getElementById('recentOrdersTitle').textContent='คำสั่งซื้อล่าสุดของฉัน';
+      document.getElementById('recentOrders').innerHTML=renderMyOrdersMini(orders.slice(0,5));
+      document.getElementById('secondCardHeader').innerHTML=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><span class="card-title">สรุปการสั่งซื้อของฉัน</span>`;
+      document.getElementById('lowStock').innerHTML=renderMyAccountSummary(orders);
+      document.getElementById('dashTrendWrap').innerHTML='';
+      await loadShop();
+      return;
+    }
+
+    if(ME?.role==='พนักงานจัดส่ง'){
+      // พนักงานจัดส่ง: เห็นเฉพาะรายการจัดส่ง ตาม Business Rule ที่จำกัดสิทธิ์ตามบทบาท
+      const shipments=await api('/api/shipments');
+      state.shipments=shipments;
+      renderShipments();
+      fillShipmentForm();
+      document.getElementById('recentOrders').innerHTML=`<div class="empty">สิทธิ์ไม่เพียงพอ</div>`;
+      document.getElementById('lowStock').innerHTML=`<div class="empty">สิทธิ์ไม่เพียงพอ</div>`;
+      document.getElementById('dashTrendWrap').innerHTML='';
+      return;
+    }
+
+    const [dashboard,customers,books,orders,payments,shipments,categories,authors,salesTrend]=await Promise.all([
+      api('/api/dashboard'),api('/api/customers'),api('/api/books'),
+      api('/api/orders'),api('/api/payments'),api('/api/shipments'),
+      api('/api/categories'),api('/api/authors'),
+      api('/api/reports/sales').catch(()=>[])
+    ]);
+    state.customers=customers; state.books=books; state.orders=orders;
+    state.payments=payments; state.shipments=shipments; state.dashboard=dashboard;
+    fillDatalist('categoryList', categories.map(c=>c.CategoryName));
+    fillDatalist('authorList', authors.map(a=>a.AuthorName));
+
+    const t=dashboard.totals;
+    countUp(document.getElementById('sc'), t.customers);
+    countUp(document.getElementById('sb'), t.books);
+    countUp(document.getElementById('so'), t.orders);
+    countUp(document.getElementById('sr'), t.revenue, true);
+    countUp(document.getElementById('sp'), t.pendingShip||0);
+
+    renderSalesTrend(salesTrend);
+    renderRecentOrders(dashboard.recentOrders);
+    renderLowStock(dashboard.lowStock);
+    renderCustomers(); renderBooks(); renderOrders();
+    renderPayments(); renderShipments();
+    fillOrderForm(); fillShipmentForm(); fillSlipForm();
+    loadBookSideWidgets();
+
+    if(ME?.role==='Admin'){
+      const users=await api('/api/users');
+      state.users=users; renderUsers();
+    }
+  }catch(e){toast(e.message,'error')}
+}
+
+// ══ SECURITY: HTML escaping ═══════════════════════════════════════
+// [FIX-8] ข้อมูลที่มาจากผู้ใช้ (ชื่อลูกค้า ชื่อหนังสือ ที่อยู่ ฯลฯ) ต้อง escape ก่อนแทรกลง innerHTML
+// เพื่อป้องกัน Stored XSS (เช่น ลูกค้าสมัครสมาชิกด้วยชื่อที่มี <script> อยู่ในนั้น)
+function esc(v){
+  return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ══ RENDER HELPERS ══════════════════════════════════════════════════
+function emptyState(msg){
+  return `<div class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>${esc(msg)}</div>`;
+}
+function statusBadge(s){
+  const map={'รอจัดส่ง':'badge-amber','กำลังจัดส่ง':'badge-blue','จัดส่งแล้ว':'badge-sage','ยกเลิก':'badge-rust'};
+  return `<span class="badge ${map[s]||'badge-gray'}">${esc(s)||'—'}</span>`;
+}
+function payBadge(m){
+  const map={'โอน':'badge-blue','เงินสด':'badge-sage','ปลายทาง':'badge-brown','บัตร':'badge-amber'};
+  const iconMap={
+    'โอน':'<svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>',
+    'เงินสด':'<svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1v22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>',
+    'ปลายทาง':'<svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>',
+    'บัตร':'<svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>'
+  };
+  return `<span class="badge ${map[m]||'badge-gray'}">${iconMap[m]||''}${esc(m)||'—'}</span>`;
+}
+function payStatusBadge(s){
+  const map={'รอชำระ':'badge-gray','รอตรวจสอบ':'badge-amber','ยืนยันแล้ว':'badge-sage','ปฏิเสธ':'badge-rust'};
+  return `<span class="badge ${map[s]||'badge-gray'}">${esc(s)||'รอชำระ'}</span>`;
+}
+
+function renderRecentOrders(rows){
+  if(!rows||!rows.length){document.getElementById('recentOrders').innerHTML=emptyState('ยังไม่มีคำสั่งซื้อ');return}
+  document.getElementById('recentOrders').innerHTML=`<table>
+    <thead><tr><th>#</th><th>ลูกค้า</th><th>รายการ</th><th>ยอดเงิน</th><th>สถานะ</th></tr></thead>
+    <tbody>${rows.slice(0,6).map(o=>`<tr>
+      <td><strong>#${o.OrderID}</strong><small>${esc(o.OrderDate)}</small></td>
+      <td>${esc(o.CustomerName)}</td>
+      <td style="max-width:180px;word-break:break-word;font-size:12px">${esc(o.Items)||'—'}</td>
+      <td><strong>${money.format(o.Amount||0)}</strong><small>${esc(o.PaymentMethod)||'—'}</small></td>
+      <td>${statusBadge(o.Status)}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+function renderLowStock(rows){
+  if(!rows||!rows.length){document.getElementById('lowStock').innerHTML=emptyState('คลังหนังสือปกติ ✓');return}
+  document.getElementById('lowStock').innerHTML=`<table>
+    <thead><tr><th>หนังสือ</th><th>คงเหลือ</th></tr></thead>
+    <tbody>${rows.map(b=>`<tr>
+      <td>${esc(b.BookName)}<small>${esc(b.ISBN)}</small></td>
+      <td><div class="stock-bar-wrap">
+        <div class="stock-bar"><div class="stock-bar-fill ${b.Stock<=5?'low':b.Stock<=10?'mid':''}" style="width:${Math.min(100,b.Stock/15*100)}%"></div></div>
+        <span class="badge ${b.Stock<=5?'badge-rust':b.Stock<=10?'badge-amber':'badge-gray'}">${b.Stock}</span>
+      </div></td>
+    </tr>`).join('')}</tbody></table>`;
+}

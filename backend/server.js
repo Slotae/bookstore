@@ -93,7 +93,7 @@ function getPool() {
 }
 
 // ── HELPERS ────────────────────────────────────────────────────────
-const ROOT = __dirname;
+const ROOT = path.resolve(__dirname, "../frontend");
 
 function json(res, status, data) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
