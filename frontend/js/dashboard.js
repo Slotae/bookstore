@@ -7,8 +7,14 @@ function showApp(){
   document.getElementById('loginScreen').classList.add('hidden');
   document.getElementById('registerScreen').classList.add('hidden');
   document.getElementById('appHeader').classList.add('visible');
+  // [FIX-11] กลับจากโหมดผู้เยี่ยมชม → แสดงชิปผู้ใช้/ปุ่มออกจากระบบตามปกติ
+  document.getElementById('guestActions').style.display='none';
+  document.getElementById('userChip').style.display='';
+  document.getElementById('logoutBtn').style.display='';
   document.getElementById('userFullName').textContent=ME.fullName;
   document.getElementById('userRole').textContent=ME.role;
+  // แสดงไอคอนตะกร้าบน header เฉพาะลูกค้า (พนักงาน/แอดมินไม่ต้องเห็น)
+  document.getElementById('headerCartWrap').style.display = ME.role==='ลูกค้า' ? '' : 'none';
 
   // แสดง/ซ่อน tabs ตาม role
   document.querySelectorAll('.tab').forEach(btn=>{
@@ -16,12 +22,29 @@ function showApp(){
     btn.style.display=roles.includes(ME.role)?'':'none';
   });
 
-  // เลือก tab แรกที่ visible
-  const firstTab=document.querySelector('.tab:not([style*="display: none"]):not([style*="display:none"])');
-  if(firstTab){
+  // [FIX-11] ถ้าล็อกอินมาเพราะกด "สั่งซื้อ" ตอนยังเป็นผู้เยี่ยมชม ให้กลับไปแท็บร้านหนังสือทันที
+  // (ตะกร้าที่หยิบไว้ตอนยังไม่ล็อกอินยังอยู่ในตัวแปร cart เดิม ไม่หายไปไหน)
+  if (typeof guestCheckoutIntent !== 'undefined' && guestCheckoutIntent && ME.role==='ลูกค้า') {
+    guestCheckoutIntent = false;
     document.querySelectorAll('.tab,.view').forEach(el=>el.classList.remove('active'));
-    firstTab.classList.add('active');
-    document.getElementById(firstTab.dataset.view)?.classList.add('active');
+    document.querySelector('.tab[data-view="shop"]')?.classList.add('active');
+    document.getElementById('shop')?.classList.add('active');
+    // [FIX-11] ล็อกอินสำเร็จเพราะกด "ดำเนินการชำระเงิน" ตอนยังเป็นผู้เยี่ยมชม → พาไปหน้าที่อยู่/ชำระเงินต่อทันที
+    if (typeof goToCheckoutStep === 'function') goToCheckoutStep();
+  } else if (ME.role==='ลูกค้า') {
+    // [หน้าหลักลูกค้า] ลูกค้าที่ล็อกอินแล้วให้เจอหน้าร้าน (shop) เป็นหน้าแรกเสมอ
+    // เหมือนกับตอนที่ยังไม่ได้ล็อกอิน (showGuestShop) แทนที่จะเจอหน้าแดชบอร์ดสรุปบัญชี
+    document.querySelectorAll('.tab,.view').forEach(el=>el.classList.remove('active'));
+    document.querySelector('.tab[data-view="shop"]')?.classList.add('active');
+    document.getElementById('shop')?.classList.add('active');
+  } else {
+    // เลือก tab แรกที่ visible
+    const firstTab=document.querySelector('.tab:not([style*="display: none"]):not([style*="display:none"])');
+    if(firstTab){
+      document.querySelectorAll('.tab,.view').forEach(el=>el.classList.remove('active'));
+      firstTab.classList.add('active');
+      document.getElementById(firstTab.dataset.view)?.classList.add('active');
+    }
   }
 
   // Stats bar: ลูกค้า และ พนักงานจัดส่ง ไม่เห็น stats เต็ม (ไม่มีสิทธิ์เข้าถึงยอดขาย/ข้อมูลลูกค้า)
@@ -167,6 +190,69 @@ function renderSalesTrend(rows){
       <div class="spark-labels">${recent.map(r=>`<span>${esc(r.SaleMonth)}</span>`).join('')}</div>
     </div>
   </div>`;
+}
+
+// ══ DELIVERY-ROLE DASHBOARD (งานที่ต้องส่งวันนี้ + สรุปสถานะ) ═══════════
+// คืนค่าการ์ดแดชบอร์ดกลับเป็นค่าเริ่มต้น (คำสั่งซื้อล่าสุด/หนังสือใกล้หมด)
+// จำเป็นเพราะเป็น SPA ไม่รีโหลดหน้าเวลาสลับบัญชี — ถ้าเคยเข้าด้วย role พนักงานจัดส่งมาก่อน
+// การ์ดจะยังค้างธีม "จัดส่ง" อยู่ ต้องรีเซ็ตกลับก่อนให้ role อื่นใช้งานการ์ดเดิม
+function resetDashboardCards(){
+  const iconEl1=document.getElementById('recentOrdersIcon');
+  if(iconEl1) iconEl1.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>';
+  const iconEl2=document.getElementById('secondCardIcon');
+  if(iconEl2) iconEl2.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+  document.getElementById('secondCard')?.classList.remove('blue');
+  document.getElementById('secondCard')?.classList.add('amber');
+  document.getElementById('recentOrdersTitle').textContent='คำสั่งซื้อล่าสุด';
+  document.getElementById('secondCardTitle').textContent='หนังสือใกล้หมด (≤15 เล่ม)';
+}
+
+function renderDeliveryDashboard(){
+  // สลับไอคอนหัวการ์ดให้ตรงธีม "จัดส่ง" แทนไอคอนตะกร้า/แจ้งเตือนสต็อกเดิม
+  const iconEl1=document.getElementById('recentOrdersIcon');
+  if(iconEl1) iconEl1.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>';
+  const iconEl2=document.getElementById('secondCardIcon');
+  if(iconEl2) iconEl2.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>';
+  document.getElementById('secondCard')?.classList.remove('amber');
+  document.getElementById('secondCard')?.classList.add('blue');
+  document.getElementById('recentOrdersTitle').textContent='งานที่ต้องจัดส่งวันนี้';
+  document.getElementById('secondCardTitle').textContent='สรุปสถานะการจัดส่งทั้งหมด';
+
+  // ── งานวันนี้: เฉพาะรายการที่ยังไม่จบ (รอจัดส่ง/กำลังจัดส่ง) และวันจัดส่งตรงกับวันนี้ ──
+  const todays=state.shipments.filter(s=>isToday(s.ShipDate) && (s.Status==='รอจัดส่ง'||s.Status==='กำลังจัดส่ง'));
+  const taskEl=document.getElementById('recentOrders');
+  if(!todays.length){
+    taskEl.innerHTML=`<div class="empty"><svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>ไม่มีงานที่ต้องจัดส่งในวันนี้ ✓</div>`;
+  } else {
+    taskEl.innerHTML=todays.map(s=>{
+      const next=SHIP_NEXT_STATUS?.[s.Status];
+      return `<div class="dtask-row">
+        <div class="dtask-icon">${typeof SHIP_ICON!=='undefined'?SHIP_ICON.truck:''}</div>
+        <div class="dtask-main">
+          <div class="dtask-title">#${s.OrderID} — ${esc(s.CustomerName)}</div>
+          <div class="dtask-sub">${s.ShippingCompany?esc(s.ShippingCompany)+' · ':''}${esc(s.TrackingNo)||'ยังไม่มีเลขพัสดุ'}</div>
+        </div>
+        ${statusBadge(s.Status)}
+        ${ME?.role==='พนักงานจัดส่ง' && s.Status==='รอจัดส่ง'
+          ? `<button class="btn-ship-accept" onclick="acceptShipment(${s.ShipmentID})">${SHIP_ICON.check}รับงาน</button>`
+          : (next && (ME?.role!=='พนักงานจัดส่ง'||s.AssignedDriverID===ME?.userID)
+            ? `<button class="btn-ship-advance" onclick="quickAdvanceShipment(${s.ShipmentID},'${next}')">${SHIP_ICON.check}${SHIP_NEXT_LABEL[s.Status]}</button>` : '')}
+      </div>`;
+    }).join('');
+  }
+
+  // ── สรุปจำนวนตามสถานะ (ทุกวัน ไม่ใช่แค่วันนี้) เป็นแผนภูมิแท่งสั้นๆ ──
+  const counts=typeof shipCounts==='function' ? shipCounts() : {};
+  const colorMap={'รอจัดส่ง':'','กำลังจัดส่ง':'blue','จัดส่งแล้ว':'sage','ยกเลิก':'rust'};
+  const max=Math.max(1, ...Object.values(counts));
+  document.getElementById('lowStock').innerHTML=`<div class="bar-chart">${SHIP_STATUSES.map(key=>`
+    <div class="bar-row">
+      <span class="bar-label">${key}</span>
+      <div class="bar-track"><div class="bar-fill ${colorMap[key]}" style="width:${Math.max(3,(counts[key]||0)/max*100)}%"></div></div>
+      <span class="bar-value">${counts[key]||0}</span>
+    </div>`).join('')}</div>`;
+
+  document.getElementById('dashTrendWrap').innerHTML='';
 }
 
 async function loadBusinessDashboard(){

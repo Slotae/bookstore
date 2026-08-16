@@ -68,6 +68,8 @@ document.querySelectorAll('.tab').forEach(btn=>{
     btn.classList.add('active');
     document.getElementById(btn.dataset.view)?.classList.add('active');
     if(btn.dataset.view==='reports') loadReportsTab();
+    // [FIX-11] เข้าแท็บร้านหนังสือใหม่ทุกครั้ง ให้เริ่มที่ขั้นเลือกซื้อสินค้าเสมอ
+    if(btn.dataset.view==='shop' && typeof backToBrowseStep==='function') backToBrowseStep();
   });
 });
 
@@ -75,15 +77,11 @@ document.querySelectorAll('.tab').forEach(btn=>{
 async function loadAll(){
   try{
     if(ME?.role==='ลูกค้า'){
-      // ลูกค้า: โหลดเฉพาะคำสั่งซื้อของตัวเอง + ร้านหนังสือ
+      // ลูกค้า: โหลดเฉพาะคำสั่งซื้อของตัวเอง + ร้านหนังสือ (ไม่มีแท็บ "ภาพรวม" สำหรับลูกค้าแล้ว
+      // — หน้าแรกของลูกค้าคือร้านหนังสือ ส่วนสรุปบัญชี/ประวัติสั่งซื้อย้ายไปอยู่ในแท็บ "คำสั่งซื้อของฉัน")
       const orders=await api('/api/my/orders');
       renderMyOrders(orders);
-      // dashboard สำหรับลูกค้า — สรุปการสั่งซื้อของตัวเอง แทนแผงที่ต้องใช้สิทธิ์แอดมิน
-      document.getElementById('recentOrdersTitle').textContent='คำสั่งซื้อล่าสุดของฉัน';
-      document.getElementById('recentOrders').innerHTML=renderMyOrdersMini(orders.slice(0,5));
-      document.getElementById('secondCardHeader').innerHTML=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><span class="card-title">สรุปการสั่งซื้อของฉัน</span>`;
-      document.getElementById('lowStock').innerHTML=renderMyAccountSummary(orders);
-      document.getElementById('dashTrendWrap').innerHTML='';
+      document.getElementById('myAccountSummary').innerHTML=renderMyAccountSummary(orders);
       await loadShop();
       return;
     }
@@ -94,9 +92,7 @@ async function loadAll(){
       state.shipments=shipments;
       renderShipments();
       fillShipmentForm();
-      document.getElementById('recentOrders').innerHTML=`<div class="empty">สิทธิ์ไม่เพียงพอ</div>`;
-      document.getElementById('lowStock').innerHTML=`<div class="empty">สิทธิ์ไม่เพียงพอ</div>`;
-      document.getElementById('dashTrendWrap').innerHTML='';
+      renderDeliveryDashboard();
       return;
     }
 
@@ -106,6 +102,7 @@ async function loadAll(){
       api('/api/categories'),api('/api/authors'),
       api('/api/reports/sales').catch(()=>[])
     ]);
+    resetDashboardCards();
     state.customers=customers; state.books=books; state.orders=orders;
     state.payments=payments; state.shipments=shipments; state.dashboard=dashboard;
     fillDatalist('categoryList', categories.map(c=>c.CategoryName));
@@ -143,6 +140,25 @@ function esc(v){
 // ══ RENDER HELPERS ══════════════════════════════════════════════════
 function emptyState(msg){
   return `<div class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>${esc(msg)}</div>`;
+}
+// ── จัดรูปแบบวันที่ให้อ่านง่าย (พ.ศ., ย่อเดือนไทย) แทนการโชว์ ISO string ดิบ ──
+const TH_MONTHS_SHORT=['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+function fmtDate(d, withTime=false){
+  if(!d) return '—';
+  const dt=new Date(d);
+  if(isNaN(dt.getTime())) return esc(d);
+  const day=dt.getDate();
+  const month=TH_MONTHS_SHORT[dt.getMonth()];
+  const year=dt.getFullYear()+543;
+  let out=`${day} ${month} ${year}`;
+  if(withTime) out+=` · ${dt.getHours().toString().padStart(2,'0')}:${dt.getMinutes().toString().padStart(2,'0')}`;
+  return out;
+}
+// เทียบว่าวันที่ตรงกับ "วันนี้" หรือไม่ (ใช้ตัดวันแบบ local date เทียบ ไม่สนเวลา)
+function isToday(d){
+  if(!d) return false;
+  const dt=new Date(d), now=new Date();
+  return dt.getFullYear()===now.getFullYear() && dt.getMonth()===now.getMonth() && dt.getDate()===now.getDate();
 }
 function statusBadge(s){
   const map={'รอจัดส่ง':'badge-amber','กำลังจัดส่ง':'badge-blue','จัดส่งแล้ว':'badge-sage','ยกเลิก':'badge-rust'};

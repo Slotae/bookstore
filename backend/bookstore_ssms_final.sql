@@ -36,8 +36,9 @@ GO
 -- ══════════════════════════════════════════════════════════════════
 -- 2. ลบตารางเก่า (ลำดับสำคัญ — child ก่อน parent)
 -- ══════════════════════════════════════════════════════════════════
-IF OBJECT_ID(N'dbo.SystemUser',   N'U') IS NOT NULL DROP TABLE dbo.SystemUser;
+IF OBJECT_ID(N'dbo.ShipmentHistory', N'U') IS NOT NULL DROP TABLE dbo.ShipmentHistory;
 IF OBJECT_ID(N'dbo.Shipment',     N'U') IS NOT NULL DROP TABLE dbo.Shipment;
+IF OBJECT_ID(N'dbo.SystemUser',   N'U') IS NOT NULL DROP TABLE dbo.SystemUser;
 IF OBJECT_ID(N'dbo.Payment',      N'U') IS NOT NULL DROP TABLE dbo.Payment;
 IF OBJECT_ID(N'dbo.Order_Detail', N'U') IS NOT NULL DROP TABLE dbo.Order_Detail;
 IF OBJECT_ID(N'dbo.Orders',       N'U') IS NOT NULL DROP TABLE dbo.Orders;
@@ -143,6 +144,7 @@ CREATE TABLE dbo.Payment (
     PaymentStatus NVARCHAR(20)      NOT NULL CONSTRAINT DF_Payment_PaymentStatus DEFAULT (N'รอชำระ'),
     OrderID       INT               NOT NULL,
     SlipImage     NVARCHAR(MAX)     NULL,   -- Base64 รูปสลิป
+    RejectedAt    DATE              NULL,   -- วันที่ถูกปฏิเสธ ใช้เป็นจุดเริ่มนับวันสำหรับ auto-cancel
     CONSTRAINT PK_Payment         PRIMARY KEY (PaymentID),
     CONSTRAINT UQ_Payment_OrderID UNIQUE (OrderID),
     CONSTRAINT FK_Payment_Orders  FOREIGN KEY (OrderID) REFERENCES dbo.Orders (OrderID) ON DELETE CASCADE,
@@ -159,7 +161,16 @@ CREATE TABLE dbo.Shipment (
     Status          NVARCHAR(30)      NOT NULL,
     Address         NVARCHAR(300)     NOT NULL,
     ShippingCompany NVARCHAR(100)     NULL,   -- บริษัทขนส่ง เช่น Kerry, Flash, J&T
+    AssignedDriverID INT              NULL,
+    AcceptedAt      DATETIME2         NULL,
+    PickedUpAt      DATETIME2         NULL,
+    DeliveredAt     DATETIME2         NULL,
+    DriverLat       DECIMAL(10,7)     NULL,
+    DriverLng       DECIMAL(10,7)     NULL,
+    LastLocationAt  DATETIME2         NULL,
     OrderID         INT               NOT NULL,
+    CancelNote      NVARCHAR(500)     NULL,
+    CancelledAt     DATETIME2         NULL,
     CONSTRAINT PK_Shipment            PRIMARY KEY (ShipmentID),
     CONSTRAINT UQ_Shipment_TrackingNo UNIQUE (TrackingNo),
     CONSTRAINT UQ_Shipment_OrderID    UNIQUE (OrderID),
@@ -193,9 +204,31 @@ GO
 -- 5. Index เสริมสำหรับคอลัมน์ที่ค้นหา/เรียงลำดับบ่อย
 --    (Non-clustered — เร่งความเร็ว SELECT โดยไม่กระทบ PK/FK เดิม)
 -- ══════════════════════════════════════════════════════════════════
+ALTER TABLE dbo.Shipment ADD CONSTRAINT FK_Shipment_Driver
+  FOREIGN KEY (AssignedDriverID) REFERENCES dbo.SystemUser(UserID) ON DELETE SET NULL;
+GO
+
 CREATE NONCLUSTERED INDEX IX_Book_BookName    ON dbo.Book(BookName);
 CREATE NONCLUSTERED INDEX IX_Orders_OrderDate ON dbo.Orders(OrderDate);
 CREATE NONCLUSTERED INDEX IX_Customer_Name    ON dbo.Customer(CustomerName);
+GO
+
+-- ══ Delivery workflow: assignment + tracking timeline ═══════════════
+CREATE TABLE dbo.ShipmentHistory (
+    HistoryID INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+    ShipmentID INT NOT NULL,
+    Status NVARCHAR(30) NOT NULL,
+    Note NVARCHAR(500) NULL,
+    ActorUserID INT NULL,
+    ActorName NVARCHAR(100) NULL,
+    CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_ShipmentHistory_CreatedAt DEFAULT SYSDATETIME(),
+    CONSTRAINT FK_ShipmentHistory_Shipment FOREIGN KEY (ShipmentID)
+      REFERENCES dbo.Shipment(ShipmentID) ON DELETE CASCADE,
+    CONSTRAINT FK_ShipmentHistory_Actor FOREIGN KEY (ActorUserID)
+      REFERENCES dbo.SystemUser(UserID) ON DELETE SET NULL
+);
+CREATE INDEX IX_ShipmentHistory_ShipmentID_CreatedAt
+  ON dbo.ShipmentHistory(ShipmentID,CreatedAt);
 GO
 
 -- ══════════════════════════════════════════════════════════════════

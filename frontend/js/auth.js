@@ -61,14 +61,36 @@ async function doLogout(){
   await fetch('/api/auth/logout',{method:'POST',headers:{Authorization:'Bearer '+TOKEN}}).catch(()=>{});
   TOKEN=''; ME=null;
   localStorage.removeItem('bms_token'); localStorage.removeItem('bms_me');
-  document.getElementById('appHeader').classList.remove('visible');
-  document.getElementById('statsBar').style.display='none';
-  document.getElementById('appTabs').style.display='none';
-  document.getElementById('appMain').style.display='none';
-  showLogin();
+  // [FIX-11] ออกจากระบบแล้วกลับไปดูหน้าร้านต่อได้เลย ไม่ต้องบังคับเข้าหน้าล็อกอิน
+  showGuestShop();
 }
 
 // ══ SHOW APP + ROLE-BASED SETUP ════════════════════════════════════
+
+// [FIX-11] โหมดผู้เยี่ยมชม — ดูรายการหนังสือ/หยิบลงตะกร้าได้โดยไม่ต้องล็อกอิน
+// จะเจอหน้าล็อกอินก็ต่อเมื่อกด "เข้าสู่ระบบ/สมัครสมาชิก" เอง หรือกด "สั่งซื้อ" ที่ต้องยืนยันตัวตนก่อนตัดสต็อก/บันทึกคำสั่งซื้อจริง
+function showGuestShop(){
+  document.getElementById('loginScreen').classList.add('hidden');
+  document.getElementById('registerScreen').classList.add('hidden');
+  document.getElementById('appHeader').classList.add('visible');
+  document.getElementById('guestActions').style.display='';
+  document.getElementById('userChip').style.display='none';
+  document.getElementById('logoutBtn').style.display='none';
+  document.getElementById('headerCartWrap').style.display='';
+  document.getElementById('statsBar').style.display='none';
+  document.getElementById('appTabs').style.display='';
+  document.querySelectorAll('.tab').forEach(btn=>{
+    const roles=(btn.dataset.roles||'').split(',').map(r=>r.trim());
+    btn.style.display=roles.includes('guest')?'':'none';
+  });
+  document.querySelectorAll('.tab,.view').forEach(el=>el.classList.remove('active'));
+  document.querySelector('.tab[data-view="shop"]')?.classList.add('active');
+  document.getElementById('shop')?.classList.add('active');
+  document.getElementById('appMain').style.display='';
+  // [FIX-11] กลับมาที่ขั้นเลือกซื้อสินค้าเสมอ ไม่ให้ค้างอยู่หน้าชำระเงินจากรอบก่อน
+  if (typeof backToBrowseStep === 'function') backToBrowseStep();
+  loadGuestShop();
+}
 
 // Restore an existing session after every script has loaded.
 if(TOKEN&&ME){
@@ -77,5 +99,10 @@ if(TOKEN&&ME){
   }).catch(()=>{
     localStorage.removeItem('bms_token'); localStorage.removeItem('bms_me');
     TOKEN=''; ME=null;
+    showGuestShop();
   });
+} else {
+  // [FIX-11] ต้องรอให้ทุกสคริปต์ (รวม shop.js ที่มี loadGuestShop) โหลด/รันเสร็จก่อน
+  // ถ้าเรียก showGuestShop() ตรงนี้ทันทีจะพังเพราะ auth.js โหลดก่อน shop.js
+  document.addEventListener('DOMContentLoaded', showGuestShop);
 }

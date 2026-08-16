@@ -106,6 +106,13 @@ async function doCheckout() {
   const err = document.getElementById('checkoutError');
   err.textContent = '';
   if (!cart.length) { err.textContent = 'กรุณาเพิ่มสินค้าในตะกร้าก่อน'; return; }
+  // [FIX-11] เผื่อไว้กันเหนียว — ปกติเข้าหน้านี้ไม่ได้ตั้งแต่แรกถ้ายังไม่ล็อกอิน (เช็คที่ goToCheckoutStep() แล้ว)
+  if (!TOKEN) {
+    guestCheckoutIntent = true;
+    toast('กรุณาเข้าสู่ระบบหรือสมัครสมาชิกก่อนยืนยันการสั่งซื้อ', 'error');
+    showLogin();
+    return;
+  }
   const address = document.getElementById('checkoutAddress').value.trim();
   if (!address) { err.textContent = 'กรุณากรอกที่อยู่จัดส่ง'; return; }
   if (!myCustomerID) {
@@ -168,6 +175,7 @@ async function doCheckout() {
     cart = [];
     renderCart();
     renderShopCatalog(shopBooks);
+    backToBrowseStep(); // [FIX-11] สั่งซื้อสำเร็จแล้ว กลับไปหน้าเลือกซื้อสินค้าตามปกติ
     checkoutSlipBase64 = null;
     document.getElementById('checkoutSlipFile').value = '';
     document.getElementById('checkoutSlipPreview').style.display = 'none';

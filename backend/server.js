@@ -617,12 +617,18 @@ async function getOrders() {
 async function getShipments() {
   return query(`
     SELECT s.ShipmentID, s.ShipDate, s.TrackingNo, s.Status, s.Address,
-      s.ShippingCompany, s.CancelNote, s.CancelledAt, o.OrderID, c.CustomerName, p.Amount
+      s.ShippingCompany, s.CancelNote, s.CancelledAt,
+      s.AssignedDriverID, du.FullName AS AssignedDriverName,
+      s.AcceptedAt, s.PickedUpAt, s.DeliveredAt,
+      s.DriverLat, s.DriverLng, s.LastLocationAt,
+      o.OrderID, c.CustomerName, c.Phone, p.Amount
     FROM dbo.Shipment s
-    JOIN dbo.Orders o  ON o.OrderID=s.OrderID
+    JOIN dbo.Orders o ON o.OrderID=s.OrderID
     JOIN dbo.Customer c ON c.CustomerID=o.CustomerID
     LEFT JOIN dbo.Payment p ON p.OrderID=o.OrderID
-    ORDER BY s.ShipmentID DESC;
+    LEFT JOIN dbo.SystemUser du ON du.UserID=s.AssignedDriverID
+    ORDER BY CASE WHEN s.Status=N'รอจัดส่ง' THEN 0 WHEN s.Status=N'กำลังจัดส่ง' THEN 1 ELSE 2 END,
+             s.ShipmentID DESC;
   `);
 }
 
@@ -648,6 +654,66 @@ async function ensureShippingCompanyColumn() {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Shipment') AND name='ShippingCompany')
       ALTER TABLE dbo.Shipment ADD ShippingCompany NVARCHAR(100) NULL;
   `);
+}
+
+// ── DELIVERY WORKFLOW: assignment + timestamps + live driver location + history
+async function ensureDeliveryWorkflow() {
+  const pool = await getPool();
+  await pool.request().query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Shipment') AND name='AssignedDriverID')
+      ALTER TABLE dbo.Shipment ADD AssignedDriverID INT NULL;
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Shipment') AND name='AcceptedAt')
+      ALTER TABLE dbo.Shipment ADD AcceptedAt DATETIME2 NULL;
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Shipment') AND name='PickedUpAt')
+      ALTER TABLE dbo.Shipment ADD PickedUpAt DATETIME2 NULL;
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Shipment') AND name='DeliveredAt')
+      ALTER TABLE dbo.Shipment ADD DeliveredAt DATETIME2 NULL;
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Shipment') AND name='DriverLat')
+      ALTER TABLE dbo.Shipment ADD DriverLat DECIMAL(10,7) NULL;
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Shipment') AND name='DriverLng')
+      ALTER TABLE dbo.Shipment ADD DriverLng DECIMAL(10,7) NULL;
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Shipment') AND name='LastLocationAt')
+      ALTER TABLE dbo.Shipment ADD LastLocationAt DATETIME2 NULL;
+
+    IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name='FK_Shipment_AssignedDriver' AND parent_object_id=OBJECT_ID('dbo.Shipment'))
+      ALTER TABLE dbo.Shipment ADD CONSTRAINT FK_Shipment_AssignedDriver
+        FOREIGN KEY (AssignedDriverID) REFERENCES dbo.SystemUser(UserID) ON DELETE SET NULL;
+
+    IF OBJECT_ID('dbo.ShipmentHistory','U') IS NULL
+    BEGIN
+      CREATE TABLE dbo.ShipmentHistory (
+        HistoryID INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        ShipmentID INT NOT NULL,
+        Status NVARCHAR(30) NOT NULL,
+        Note NVARCHAR(500) NULL,
+        ActorUserID INT NULL,
+        ActorName NVARCHAR(100) NULL,
+        CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_ShipmentHistory_CreatedAt DEFAULT SYSDATETIME(),
+        CONSTRAINT FK_ShipmentHistory_Shipment FOREIGN KEY (ShipmentID)
+          REFERENCES dbo.Shipment(ShipmentID) ON DELETE CASCADE
+      );
+      CREATE INDEX IX_ShipmentHistory_ShipmentID_CreatedAt
+        ON dbo.ShipmentHistory(ShipmentID,CreatedAt);
+    END;
+
+    INSERT INTO dbo.ShipmentHistory(ShipmentID,Status,Note,ActorName)
+    SELECT s.ShipmentID,s.Status,N'สถานะเริ่มต้นของรายการจัดส่ง',N'ระบบ'
+    FROM dbo.Shipment s
+    WHERE NOT EXISTS (SELECT 1 FROM dbo.ShipmentHistory h WHERE h.ShipmentID=s.ShipmentID);
+  `);
+}
+async function addShipmentHistory(shipmentId,status,note,actorUserID,actorName,tx=null){
+  const req=tx?new sql.Request(tx):(await getPool()).request();
+  await req.input("ShipmentID",sql.Int,shipmentId).input("Status",sql.NVarChar(30),status)
+    .input("Note",sql.NVarChar(500),note||null).input("ActorUserID",sql.Int,actorUserID||null)
+    .input("ActorName",sql.NVarChar(100),actorName||"ระบบ")
+    .query(`INSERT INTO dbo.ShipmentHistory(ShipmentID,Status,Note,ActorUserID,ActorName)
+            VALUES(@ShipmentID,@Status,@Note,@ActorUserID,@ActorName);`);
+}
+async function getShipmentTimeline(shipmentId){
+  return query(`SELECT h.HistoryID,h.Status,h.Note,h.CreatedAt,h.ActorName
+                FROM dbo.ShipmentHistory h WHERE h.ShipmentID=@ID ORDER BY h.HistoryID`,
+    {ID:{type:sql.Int,value:shipmentId}});
 }
 
 // ── ENSURE CANCEL NOTE COLUMNS ────────────────────────────────────────
@@ -745,6 +811,10 @@ async function createOrder(input) {
       .input("Address",    sql.NVarChar(300), input.address || "รับที่ร้าน")
       .input("OrderID",    sql.Int,           order.OrderID)
       .query(`INSERT INTO dbo.Shipment(ShipDate,TrackingNo,Status,Address,OrderID) VALUES(@ShipDate,@TrackingNo,@Status,@Address,@OrderID);`);
+    const createdShip = await new sql.Request(tx).input("OrderID",sql.Int,order.OrderID)
+      .query(`SELECT ShipmentID FROM dbo.Shipment WHERE OrderID=@OrderID;`);
+    if(createdShip.recordset[0])
+      await addShipmentHistory(createdShip.recordset[0].ShipmentID,"รอจัดส่ง","สร้างรายการจัดส่ง",null,"ระบบ",tx);
 
     await tx.commit();
     return { ...order, total };
@@ -1025,6 +1095,11 @@ async function handleApi(req, res, url) {
       }
     }
 
+    // ── หน้าร้าน (public) ──
+    // [FIX-11] เปิดให้ทุกคนดูรายการหนังสือได้โดยไม่ต้องล็อกอิน (ดูสินค้าได้เลย)
+    // จะบังคับล็อกอินเฉพาะตอนยืนยันคำสั่งซื้อ (POST /api/orders) ซึ่งยังอยู่หลัง requireAuth ด้านล่าง
+    if (method === "GET" && p === "/api/books") return json(res, 200, await getBooks());
+
     // ── PROTECTED ──
     const sess = requireAuth(req, res);
     if (!sess) return;
@@ -1092,8 +1167,6 @@ async function handleApi(req, res, url) {
       const paramValue = url.searchParams.get("v");
       return json(res, 200, await runLibraryQuery(id, paramValue));
     }
-    // /api/books: เปิดให้ทุก role ที่ล็อกอินแล้วเข้าถึงได้ (ลูกค้าต้องใช้ดูหน้าร้าน, พนักงานทุกคนต้องใช้อ้างอิงชื่อหนังสือ)
-    if (method === "GET" && p === "/api/books")      return json(res, 200, await getBooks());
     if (method === "GET" && p === "/api/orders") {
       if (!requireRole(sess, res, ["Admin","พนักงานขาย"])) return;
       return json(res, 200, await getOrders());
@@ -1135,18 +1208,29 @@ async function handleApi(req, res, url) {
       const rows = await query(`
         SELECT o.OrderID, CONVERT(varchar(10),o.OrderDate,120) AS OrderDate,
           p.PaymentID, p.Amount, p.PaymentMethod, p.PaymentStatus, p.SlipImage,
-          s.Status, s.TrackingNo, s.CancelNote, s.CancelledAt,
-          STRING_AGG(CONCAT(b.BookName,' x',od.Quantity),', ') AS Items
+          s.ShipmentID, s.Status, s.TrackingNo, s.Address, s.CancelNote, s.CancelledAt,
+          du.FullName AS AssignedDriverName, s.AcceptedAt, s.PickedUpAt, s.DeliveredAt,
+          s.DriverLat, s.DriverLng, s.LastLocationAt, s.ShippingCompany,
+          STRING_AGG(CONCAT(b.BookName,' x',od.Quantity),', ') AS Items,
+          (SELECT h.HistoryID,h.Status,h.Note,h.CreatedAt,h.ActorName
+             FROM dbo.ShipmentHistory h WHERE h.ShipmentID=s.ShipmentID
+             ORDER BY h.HistoryID FOR JSON PATH) AS TimelineJson
         FROM dbo.Orders o
         JOIN dbo.Order_Detail od ON od.OrderID=o.OrderID
         JOIN dbo.Book b ON b.ISBN=od.ISBN
         LEFT JOIN dbo.Payment p ON p.OrderID=o.OrderID
         LEFT JOIN dbo.Shipment s ON s.OrderID=o.OrderID
+        LEFT JOIN dbo.SystemUser du ON du.UserID=s.AssignedDriverID
         WHERE o.CustomerID=@cid
-        GROUP BY o.OrderID,o.OrderDate,p.PaymentID,p.Amount,p.PaymentMethod,p.PaymentStatus,p.SlipImage,s.Status,s.TrackingNo,s.CancelNote,s.CancelledAt
+        GROUP BY o.OrderID,o.OrderDate,p.PaymentID,p.Amount,p.PaymentMethod,p.PaymentStatus,p.SlipImage,
+          s.ShipmentID,s.Status,s.TrackingNo,s.Address,s.CancelNote,s.CancelledAt,du.FullName,s.AcceptedAt,s.PickedUpAt,s.DeliveredAt,
+          s.DriverLat,s.DriverLng,s.LastLocationAt,s.ShippingCompany
         ORDER BY o.OrderID DESC;
       `, { cid: { type: sql.Int, value: cid } });
-      return json(res, 200, rows);
+      return json(res, 200, rows.map(r => {
+        let Timeline=[]; try { Timeline=JSON.parse(r.TimelineJson||'[]'); } catch {}
+        return {...r, Timeline, TimelineJson:undefined};
+      }));
     }
 
     // GET RECEIPT (ใบเสร็จรับเงิน) — Admin/พนักงานขาย ดูได้ทุกออเดอร์, ลูกค้าดูได้เฉพาะของตัวเอง
@@ -1307,22 +1391,80 @@ async function handleApi(req, res, url) {
       return json(res, 201, await createOrder(body));
     }
 
-    // PATCH SHIPMENT STATUS (Admin, พนักงานขาย, พนักงานจัดส่ง)
+    // GET shipment timeline — ลูกค้าเห็นได้เฉพาะออเดอร์ของตัวเอง
+    if (method === "GET" && p.startsWith("/api/shipments/") && p.endsWith("/timeline")) {
+      const id=Number(p.split("/")[3]); if(!id) throw new Error("ShipmentID ไม่ถูกต้อง");
+      if(sess.role==="ลูกค้า"){
+        const own=await query(`SELECT s.ShipmentID FROM dbo.Shipment s JOIN dbo.Orders o ON o.OrderID=s.OrderID
+          WHERE s.ShipmentID=@ID AND o.CustomerID=@CID`,
+          {ID:{type:sql.Int,value:id},CID:{type:sql.Int,value:sess.customerID||0}});
+        if(!own.length) return json(res,403,{error:"ไม่มีสิทธิ์ดูรายการนี้"});
+      } else if(!["Admin","พนักงานขาย","พนักงานจัดส่ง"].includes(sess.role)) return json(res,403,{error:"ไม่มีสิทธิ์"});
+      return json(res,200,await getShipmentTimeline(id));
+    }
+
+    // POST accept — atomic กันพนักงาน 2 คนกดรับงานเดียวกันพร้อมกัน
+    if (method === "POST" && p.startsWith("/api/shipments/") && p.endsWith("/accept")) {
+      if(sess.role!=="พนักงานจัดส่ง") return json(res,403,{error:"เฉพาะพนักงานจัดส่งเท่านั้นที่รับงานได้"});
+      const id=Number(p.split("/")[3]); if(!id) throw new Error("ShipmentID ไม่ถูกต้อง");
+      const pool=await getPool(),tx=new sql.Transaction(pool); await tx.begin();
+      try{
+        const cur=(await new sql.Request(tx).input("ID",sql.Int,id)
+          .query(`SELECT ShipmentID,Status,AssignedDriverID FROM dbo.Shipment WITH (UPDLOCK,ROWLOCK) WHERE ShipmentID=@ID`)).recordset[0];
+        if(!cur) throw new Error("ไม่พบรายการจัดส่ง");
+        if(cur.Status!=="รอจัดส่ง") throw new Error(cur.Status==="กำลังจัดส่ง"?"งานนี้มีพนักงานรับไปแล้ว":"งานนี้ไม่อยู่ในคิวที่รับได้");
+        if(cur.AssignedDriverID) throw new Error("งานนี้ถูกพนักงานคนอื่นรับไปแล้ว");
+        await new sql.Request(tx).input("ID",sql.Int,id).input("DriverID",sql.Int,sess.userID)
+          .query(`UPDATE dbo.Shipment SET AssignedDriverID=@DriverID,Status=N'กำลังจัดส่ง',
+                  AcceptedAt=SYSDATETIME(),PickedUpAt=SYSDATETIME() WHERE ShipmentID=@ID`);
+        await addShipmentHistory(id,"กำลังจัดส่ง",`รับงานโดย ${sess.fullName}`,sess.userID,sess.fullName,tx);
+        await tx.commit(); return json(res,200,{ok:true});
+      }catch(err){try{await tx.rollback();}catch{} throw err;}
+    }
+
+    // PATCH live GPS ของงานที่พนักงานรับไว้
+    if (method === "PATCH" && p.startsWith("/api/shipments/") && p.endsWith("/location")) {
+      if(sess.role!=="พนักงานจัดส่ง") return json(res,403,{error:"เฉพาะพนักงานจัดส่งเท่านั้น"});
+      const id=Number(p.split("/")[3]),lat=Number(body.lat),lng=Number(body.lng);
+      if(!id||!Number.isFinite(lat)||!Number.isFinite(lng)||Math.abs(lat)>90||Math.abs(lng)>180) throw new Error("พิกัดไม่ถูกต้อง");
+      const own=await query(`SELECT ShipmentID FROM dbo.Shipment WHERE ShipmentID=@ID AND AssignedDriverID=@D AND Status=N'กำลังจัดส่ง'`,
+        {ID:{type:sql.Int,value:id},D:{type:sql.Int,value:sess.userID}});
+      if(!own.length) return json(res,403,{error:"งานนี้ไม่ได้อยู่ในความรับผิดชอบของคุณ"});
+      await query(`UPDATE dbo.Shipment SET DriverLat=@Lat,DriverLng=@Lng,LastLocationAt=SYSDATETIME() WHERE ShipmentID=@ID`,
+        {ID:{type:sql.Int,value:id},Lat:{type:sql.Decimal(10,7),value:lat},Lng:{type:sql.Decimal(10,7),value:lng}});
+      return json(res,200,{ok:true});
+    }
+
+    // PATCH SHIPMENT STATUS — guarded transitions + driver ownership + history
     if (method === "PATCH" && p.startsWith("/api/shipments/")) {
-      if (!requireRole(sess, res, ["Admin","พนักงานขาย","พนักงานจัดส่ง"])) return;
-      const id = Number(p.split("/").pop());
-      if (!id) throw new Error("ShipmentID ไม่ถูกต้อง");
-      if (!body.status) throw new Error("กรุณาระบุสถานะ");
-      const ALLOWED_SHIP_STATUS = ["รอจัดส่ง","กำลังจัดส่ง","จัดส่งแล้ว","ยกเลิก"];
-      if (!ALLOWED_SHIP_STATUS.includes(body.status)) throw new Error("สถานะจัดส่งไม่ถูกต้อง");
-      await query(`UPDATE dbo.Shipment SET Status=@Status,TrackingNo=ISNULL(@TrackingNo,TrackingNo),ShippingCompany=ISNULL(@ShippingCompany,ShippingCompany) WHERE ShipmentID=@ID;`,
-        {
-          ID:              { type: sql.Int,           value: id                           },
-          Status:          { type: sql.NVarChar(30),  value: body.status                  },
-          TrackingNo:      { type: sql.VarChar(50),   value: body.trackingNo    || null   },
-          ShippingCompany: { type: sql.NVarChar(100), value: body.shippingCompany || null }
-        });
-      return json(res, 200, { ok: true });
+      if (!requireRole(sess,res,["Admin","พนักงานขาย","พนักงานจัดส่ง"])) return;
+      const id=Number(p.split("/").pop()); if(!id) throw new Error("ShipmentID ไม่ถูกต้อง");
+      const status=body.status;
+      const allowed=["รอจัดส่ง","กำลังจัดส่ง","จัดส่งแล้ว","ยกเลิก"];
+      if(!allowed.includes(status)) throw new Error("สถานะจัดส่งไม่ถูกต้อง");
+      const pool=await getPool(),tx=new sql.Transaction(pool); await tx.begin();
+      try{
+        const cur=(await new sql.Request(tx).input("ID",sql.Int,id)
+          .query(`SELECT ShipmentID,Status,AssignedDriverID FROM dbo.Shipment WITH (UPDLOCK,ROWLOCK) WHERE ShipmentID=@ID`)).recordset[0];
+        if(!cur) throw new Error("ไม่พบรายการจัดส่ง");
+        if(sess.role==="พนักงานจัดส่ง" && cur.AssignedDriverID!==sess.userID)
+          throw new Error("คุณอัปเดตได้เฉพาะงานที่รับไว้เท่านั้น");
+        if(sess.role==="พนักงานจัดส่ง" && status==="รอจัดส่ง") throw new Error("ไม่สามารถย้อนกลับเป็นรอจัดส่งได้");
+        const same=status===cur.Status;
+        const forward=(cur.Status==="รอจัดส่ง"&&status==="กำลังจัดส่ง")||(cur.Status==="กำลังจัดส่ง"&&status==="จัดส่งแล้ว");
+        const cancel=(sess.role!=="พนักงานจัดส่ง"&&status==="ยกเลิก"&&cur.Status!=="จัดส่งแล้ว");
+        if(!same&&!forward&&!cancel) throw new Error(`ไม่สามารถเปลี่ยนจาก "${cur.Status}" เป็น "${status}" ได้`);
+        const sets=["Status=@Status","TrackingNo=ISNULL(@TrackingNo,TrackingNo)","ShippingCompany=ISNULL(@ShippingCompany,ShippingCompany)"];
+        if(status==="กำลังจัดส่ง") sets.push("PickedUpAt=ISNULL(PickedUpAt,SYSDATETIME())");
+        if(status==="จัดส่งแล้ว") sets.push("DeliveredAt=SYSDATETIME()");
+        if(status==="ยกเลิก") sets.push("CancelledAt=SYSDATETIME()");
+        await new sql.Request(tx).input("ID",sql.Int,id).input("Status",sql.NVarChar(30),status)
+          .input("TrackingNo",sql.VarChar(50),body.trackingNo||null)
+          .input("ShippingCompany",sql.NVarChar(100),body.shippingCompany||null)
+          .query(`UPDATE dbo.Shipment SET ${sets.join(",")} WHERE ShipmentID=@ID`);
+        if(!same) await addShipmentHistory(id,status,body.note||`เปลี่ยนสถานะเป็น ${status}`,sess.userID,sess.fullName,tx);
+        await tx.commit(); return json(res,200,{ok:true});
+      }catch(err){try{await tx.rollback();}catch{} throw err;}
     }
 
     // PATCH PAYMENT STATUS (Admin/พนักงานขาย ตรวจสอบ/ยืนยัน/ปฏิเสธสลิป)
@@ -1360,27 +1502,24 @@ async function handleApi(req, res, url) {
             WHERE PaymentID=@ID;
           `);
 
-        // ── AUTO: ยืนยันชำระเงิน → เปลี่ยน Shipment เป็น "กำลังจัดส่ง" อัตโนมัติ ──
+        // ── DELIVERY WORKFLOW: ยืนยันเงิน "ไม่" รับงานแทนพนักงานจัดส่ง
+        // หลังชำระแล้ว งานยังคง "รอจัดส่ง" จนกว่าพนักงานจะกดรับงานเอง
         if (body.status === "ยืนยันแล้ว") {
-          await new sql.Request(tx2)
-            .input("OID", sql.Int, pay[0].OrderID)
-            .query(`
-              UPDATE dbo.Shipment
-              SET Status   = N'กำลังจัดส่ง',
-                  ShipDate = CONVERT(date, GETDATE())
-              WHERE OrderID = @OID AND Status = N'รอจัดส่ง';
-            `);
+          const ready = await new sql.Request(tx2).input("OID",sql.Int,pay[0].OrderID)
+            .query(`SELECT ShipmentID,Status FROM dbo.Shipment WITH (UPDLOCK,ROWLOCK) WHERE OrderID=@OID;`);
+          if(ready.recordset[0] && ready.recordset[0].Status==="รอจัดส่ง")
+            await addShipmentHistory(ready.recordset[0].ShipmentID,"รอจัดส่ง","ยืนยันการชำระเงินแล้ว — รอพนักงานรับงาน",sess.userID,sess.fullName,tx2);
         }
 
-        // ── AUTO: ปฏิเสธสลิป → เปลี่ยน Shipment กลับเป็น "รอจัดส่ง" (เคสโอน/บัตร ที่เคยยืนยันแล้วโดนเปิดตรวจใหม่แล้วปฏิเสธ) ──
+        // ── ถ้าการชำระถูกปฏิเสธก่อนส่ง: คืนงานเข้าคิว พร้อมล้างผู้รับงาน
         if (body.status === "ปฏิเสธ") {
-          await new sql.Request(tx2)
-            .input("OID", sql.Int, pay[0].OrderID)
-            .query(`
-              UPDATE dbo.Shipment
-              SET Status = N'รอจัดส่ง'
-              WHERE OrderID = @OID AND Status = N'กำลังจัดส่ง';
-            `);
+          const reset = await new sql.Request(tx2).input("OID",sql.Int,pay[0].OrderID)
+            .query(`SELECT ShipmentID,Status FROM dbo.Shipment WITH (UPDLOCK,ROWLOCK) WHERE OrderID=@OID;`);
+          if(reset.recordset[0] && reset.recordset[0].Status==="กำลังจัดส่ง"){
+            await new sql.Request(tx2).input("OID",sql.Int,pay[0].OrderID)
+              .query(`UPDATE dbo.Shipment SET Status=N'รอจัดส่ง',AssignedDriverID=NULL,AcceptedAt=NULL,PickedUpAt=NULL WHERE OrderID=@OID;`);
+            await addShipmentHistory(reset.recordset[0].ShipmentID,"รอจัดส่ง","การชำระเงินถูกปฏิเสธ — คืนงานเข้าคิว",sess.userID,sess.fullName,tx2);
+          }
         }
 
         // [FIX-13] ปฏิเสธเงินสด/ปลายทาง (NO_PROOF_METHODS) → ยกเลิกออเดอร์ทันที ไม่ต้องรอ auto-cancel 3 วัน
@@ -1406,6 +1545,7 @@ async function handleApi(req, res, url) {
               .query(`UPDATE dbo.Shipment
                       SET Status=N'ยกเลิก', CancelNote=@Note, CancelledAt=GETDATE()
                       WHERE OrderID=@OID`);
+            await addShipmentHistory(ship.recordset[0].ShipmentID,"ยกเลิก","ยกเลิกทันที: ปฏิเสธการรับเงินสด/ปลายทาง",sess.userID,sess.fullName,tx2);
           }
         }
 
@@ -1648,6 +1788,7 @@ function serveStatic(req, res, url) {
     await ensurePaymentStatusColumn();
     await ensureCancelNoteColumn();
     await ensureRejectedAtColumn();
+    await ensureDeliveryWorkflow();
     console.log("  ✅ ตรวจสอบ/ปรับโครงสร้างฐานข้อมูลเรียบร้อย");
 
     // [FIX-11] เริ่มระบบยกเลิกออเดอร์ค้างชำระอัตโนมัติ

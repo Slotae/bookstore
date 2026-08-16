@@ -6,7 +6,8 @@
   <title>Bookstore Management System</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Sarabun:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400;1,600&family=Playfair+Display:ital,wght@0,600;0,700;0,800;1,500;1,600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400;1,600&family=Kanit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -67,15 +68,50 @@
 <header id="appHeader">
   <div class="header-inner">
     <div class="header-left">
-      <div class="eyebrow">ระบบบริหารจัดการ</div>
-      <h1>Bookstore <span>Management</span> System</h1>
+      <div class="title-wrap">
+        <div class="eyebrow">ระบบบริหารจัดการ</div>
+        <h1>Bookstore <span>Management</span> System</h1>
+      </div>
     </div>
     <div class="header-right">
+      <!-- [ตะกร้าสินค้า] ย้ายมาไว้ที่ header กลาง เพื่อให้กดดูตะกร้า/ชำระเงินได้ทุกหน้า
+           (เดิมอยู่แค่ในหน้าเลือกซื้อสินค้า พอเข้าไปหน้ารายละเอียด/ชำระเงินจะกดไม่ถึง) -->
+      <div class="cart-icon-wrap" id="headerCartWrap" style="display:none">
+        <button class="cart-icon-btn" onclick="toggleCartDropdown(event)" id="cartIconBtn" aria-label="ตะกร้าสินค้า">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
+          <span class="cart-badge" id="cartBadge" style="display:none">0</span>
+        </button>
+        <div class="cart-dropdown" id="cartDropdown">
+          <div class="cart-dropdown-header">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px;color:var(--wine)"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
+            <span class="card-title">ตะกร้าสินค้า</span>
+            <button class="btn-sm rust" onclick="clearCart()" style="margin-left:auto" id="clearCartBtn">ล้างทั้งหมด</button>
+          </div>
+          <div class="cart-dropdown-items" id="cartItems"><div class="empty" style="padding:24px 14px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:30px;height:30px;margin:0 auto 6px;display:block;color:var(--border)"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>ยังไม่มีสินค้าในตะกร้า</div></div>
+          <div class="cart-total" id="cartTotal" style="display:none">
+            <span class="cart-total-label">ยอดรวม</span>
+            <span class="cart-total-amount" id="cartTotalAmt">฿0</span>
+          </div>
+          <div style="padding:12px 15px">
+            <button class="btn-primary" onclick="goToCheckoutStep()" id="proceedCheckoutBtn" disabled style="width:100%">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>ดำเนินการชำระเงิน
+            </button>
+          </div>
+        </div>
+      </div>
+      <!-- [FIX-11] แถบสำหรับผู้เยี่ยมชมที่ยังไม่ล็อกอิน (โหมดดูสินค้า) -->
+      <div class="header-right" id="guestActions" style="display:none">
+        <button class="btn-logout" onclick="showRegister()">สมัครสมาชิก</button>
+        <button class="btn-logout" onclick="showLogin()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+          เข้าสู่ระบบ
+        </button>
+      </div>
       <div class="user-chip" id="userChip">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
         <div><span id="userFullName">—</span><span class="user-role-label" id="userRole">—</span></div>
       </div>
-      <button class="btn-logout" onclick="doLogout()">
+      <button class="btn-logout" id="logoutBtn" onclick="doLogout()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
         ออกจากระบบ
       </button>
@@ -96,7 +132,7 @@
 <!-- ══ TABS ════════════════════════════════════════════════════════ -->
 <nav class="tabs" id="appTabs" style="display:none" aria-label="เมนูหลัก">
   <!-- แต่ละ role จะ show/hide tabs ที่เหมาะสม -->
-  <button class="tab active" data-view="dashboard" data-roles="Admin,พนักงานขาย,พนักงานจัดส่ง,ลูกค้า">
+  <button class="tab active" data-view="dashboard" data-roles="Admin,พนักงานขาย,พนักงานจัดส่ง">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>ภาพรวม
   </button>
   <button class="tab" data-view="customers" data-roles="Admin,พนักงานขาย">
@@ -117,11 +153,11 @@
   <button class="tab" data-view="reports" data-roles="Admin,พนักงานขาย">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>รายงาน
   </button>
+  <button class="tab" data-view="shop" data-roles="ลูกค้า,guest">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>ร้านหนังสือ
+  </button>
   <button class="tab" data-view="myorders" data-roles="ลูกค้า">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/></svg>คำสั่งซื้อของฉัน
-  </button>
-  <button class="tab" data-view="shop" data-roles="ลูกค้า">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>ร้านหนังสือ <span class="cart-badge" id="cartBadge" style="display:none">0</span>
   </button>
   <button class="tab" data-view="users" data-roles="Admin">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M6 20v-1a6 6 0 0 1 12 0v1"/><path d="M19 11l2 2-4 4-2-2"/></svg>ผู้ใช้งาน
@@ -139,14 +175,14 @@
     <div class="dash-grid">
       <div class="card">
         <div class="card-header">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
+          <span class="card-header-icon" id="recentOrdersIcon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg></span>
           <span class="card-title" id="recentOrdersTitle">คำสั่งซื้อล่าสุด</span>
         </div>
         <div class="card-body table-wrap" id="recentOrders"><div class="loading"><div class="spinner"></div>กำลังโหลด…</div></div>
       </div>
       <div class="card amber" id="secondCard">
         <div class="card-header" id="secondCardHeader">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span class="card-header-icon" id="secondCardIcon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
           <span class="card-title" id="secondCardTitle">หนังสือใกล้หมด (≤15 เล่ม)</span>
         </div>
         <div class="card-body table-wrap" id="lowStock"><div class="loading"><div class="spinner"></div>กำลังโหลด…</div></div>
@@ -359,7 +395,7 @@
             <!-- คำแนะนำบัญชีสำหรับโอนเงิน -->
             <div class="pay-hint" id="slipBankHint" style="display:none">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:15px;height:15px;flex-shrink:0"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>
-              โอนเข้าบัญชี <strong>ธ.กรุงเทพ 123-4-56789-0</strong> ชื่อบัญชี "ร้านหนังสือ The Ledger" แล้วแนบสลิปด้านล่างเพื่อบันทึกหลักฐาน
+              โอนเข้าบัญชี <strong>ธ.กรุงเทพ 123-4-56789-0</strong> ชื่อบัญชี "ร้านหนังสือ" แล้วแนบสลิปด้านล่างเพื่อบันทึกหลักฐาน
             </div>
 
             <label>อัปโหลดสลิป / หลักฐานการชำระเงิน
@@ -380,47 +416,99 @@
     </div>
   </section>
 
-  <!-- ── SHIPMENTS (Admin + พนักงานขาย + พนักงานจัดส่ง) ── -->
+  <!-- ── DELIVERY CENTER (Admin + พนักงานขาย + พนักงานจัดส่ง) ── -->
   <section class="view" id="shipments">
-    <div class="two-col">
-      <div class="card blue">
-        <div class="card-header">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
-          <span class="card-title">รายการจัดส่งทั้งหมด</span>
-        </div>
-        <div class="card-body table-wrap" id="shipmentTable"><div class="loading"><div class="spinner"></div>กำลังโหลด…</div></div>
+    <div class="delivery-hero">
+      <div>
+        <div class="eyebrow">DELIVERY CENTER</div>
+        <h2>ศูนย์จัดส่ง</h2>
+        <p>รับงาน · ดูเส้นทาง · อัปเดตสถานะ · ติดตามตำแหน่งแบบสด</p>
       </div>
-      <div class="card">
-        <div class="card-header">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-          <span class="card-title">อัปเดตสถานะการจัดส่ง</span>
-        </div>
-        <div class="card-body pad">
-          <form id="shipForm">
-            <label>เลือกรายการจัดส่ง
-              <select id="shipSelect" required><option value="">— เลือก Shipment ID —</option></select>
-            </label>
-            <label>สถานะ
-              <select id="shipStatus">
-                <option value="รอจัดส่ง">รอจัดส่ง</option>
-                <option value="กำลังจัดส่ง">กำลังจัดส่ง</option>
-                <option value="จัดส่งแล้ว">จัดส่งแล้ว</option>
-                <option value="ยกเลิก">ยกเลิก</option>
-              </select>
-            </label>
-            <label>หมายเลขพัสดุ (Tracking No)
-              <input id="shipTracking" placeholder="เช่น TH00123456">
-            </label>
-            <label>บริษัทขนส่ง
-              <input id="shipCompany" placeholder="เช่น ไปรษณีย์ไทย, Kerry, Flash">
-            </label>
-            <button class="btn-primary" type="button" onclick="updateShipment()">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>บันทึกสถานะ
-            </button>
-            <div class="form-error" id="shipError"></div>
-          </form>
-        </div>
+      <div class="delivery-hero-actions">
+        <button class="btn-sm outline" onclick="shipFilterStatus='all';shipOnlyMine=false;renderShipments()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 4 3 10 9 10"/></svg>รีเฟรชงาน
+        </button>
       </div>
+    </div>
+
+    <div id="shipStatsRow" class="ship-stats-row"></div>
+
+    <div class="delivery-layout">
+      <div class="card delivery-queue-card">
+        <div class="card-header">
+          <div>
+            <span class="card-title">คิวงานจัดส่ง</span>
+            <small class="card-subtitle">เลือกงานเพื่อดูรายละเอียดและแผนที่</small>
+          </div>
+          <span class="live-dot"><i></i> LIVE</span>
+        </div>
+        <div class="ship-toolbar">
+          <div class="ship-filter-tabs" id="shipFilterTabs"></div>
+          <input type="text" id="shipSearch" placeholder="ค้นหาลูกค้า, เบอร์, Tracking, ที่อยู่…" oninput="renderShipments()">
+        </div>
+        <div class="card-body" id="shipmentTable"><div class="loading"><div class="spinner"></div>กำลังโหลด…</div></div>
+      </div>
+
+      <aside class="delivery-side">
+        <div class="card delivery-map-card">
+          <div class="card-header">
+            <div>
+              <span class="card-title">แผนที่งานที่เลือก</span>
+              <small class="card-subtitle">ใช้ตำแหน่ง GPS ของพนักงานเมื่อเริ่มงาน</small>
+            </div>
+            <span class="map-status" id="mapStatus">ยังไม่ได้เลือกงาน</span>
+          </div>
+          <div id="deliveryMap" class="delivery-map"></div>
+          <div id="deliveryMapInfo" class="delivery-map-info">
+            <span>เลือกงานจากคิวด้านซ้ายเพื่อแสดงปลายทาง</span>
+          </div>
+        </div>
+
+        <div class="card delivery-control-card">
+          <div class="card-header">
+            <div>
+              <span class="card-title">รายละเอียด & สถานะ</span>
+              <small class="card-subtitle">จัดการงานโดยไม่ต้องออกจากหน้า</small>
+            </div>
+          </div>
+          <div class="card-body pad">
+            <form id="shipForm">
+              <label>รายการจัดส่ง
+                <select id="shipSelect" required><option value="">— เลือกรายการจัดส่ง —</option></select>
+              </label>
+              <div id="shipStepperWrap"></div>
+              <div class="delivery-control-grid">
+                <label>สถานะ
+                  <select id="shipStatus">
+                    <option value="รอจัดส่ง">รอจัดส่ง</option>
+                    <option value="กำลังจัดส่ง">กำลังจัดส่ง</option>
+                    <option value="จัดส่งแล้ว">จัดส่งแล้ว</option>
+                    <option value="ยกเลิก">ยกเลิก</option>
+                  </select>
+                </label>
+                <label>Tracking No
+                  <input id="shipTracking" placeholder="เช่น TH00123456">
+                </label>
+              </div>
+              <label>บริษัทขนส่ง
+                <input id="shipCompany" placeholder="เช่น Flash, J&T, ไปรษณีย์ไทย">
+              </label>
+              <label>หมายเหตุ
+                <textarea id="shipNote" placeholder="เช่น ลูกค้าขอฝากไว้กับ รปภ."></textarea>
+              </label>
+              <div class="delivery-form-actions">
+                <button class="btn-primary" type="button" onclick="updateShipment()">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>บันทึกสถานะ
+                </button>
+                <button class="btn-sm outline" type="button" onclick="const s=state.shipments.find(x=>x.ShipmentID===Number(document.getElementById('shipSelect').value));if(s)window.open(shipmentRouteUrl(s),'_blank','noopener')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>นำทาง
+                </button>
+              </div>
+              <div class="form-error" id="shipError"></div>
+            </form>
+          </div>
+        </div>
+      </aside>
     </div>
   </section>
 
@@ -524,6 +612,13 @@
       <h2>คำสั่งซื้อของฉัน</h2>
       <p>ติดตามสถานะการสั่งซื้อและจัดส่งของคุณ</p>
     </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <span class="card-title">สรุปบัญชีของฉัน</span>
+      </div>
+      <div class="card-body" id="myAccountSummary"><div class="loading"><div class="spinner"></div>กำลังโหลด…</div></div>
+    </div>
     <div class="card">
       <div class="card-header">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/></svg>
@@ -535,39 +630,39 @@
 
   <!-- ── SHOP (ลูกค้า เท่านั้น) ── -->
   <section class="view" id="shop">
-    <div class="two-col" style="align-items:start">
-      <!-- แคตตาล็อกหนังสือ -->
-      <div>
-        <div class="card" style="margin-bottom:0">
-          <div class="card-header">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-            <span class="card-title">หนังสือทั้งหมด</span>
-            <input id="shopSearch" placeholder="ค้นหาหนังสือ…" style="max-width:180px;padding:5px 10px;font-size:12px;border-radius:6px;border:1.5px solid var(--border)" oninput="filterShop()">
-          </div>
-          <div id="shopCatalog" class="shop-grid"><div class="loading"><div class="spinner"></div>กำลังโหลด…</div></div>
+
+    <!-- ═ ขั้นที่ 1: เลือกซื้อสินค้า ═ -->
+    <div id="shopBrowseStep">
+      <!-- [FIX-12] แถบหมวดหมู่ + ค้นหา -->
+      <div class="storefront-bar">
+        <div class="category-chips" id="categoryChips"></div>
+        <div class="storefront-right">
+          <input id="shopSearch" class="storefront-search" placeholder="ค้นหาชื่อหนังสือ ผู้แต่ง หรือหมวดหมู่…" oninput="filterShop()">
         </div>
       </div>
 
-      <!-- ตะกร้า + Checkout -->
-      <div style="position:sticky;top:16px">
-        <div class="cart-panel">
-          <div class="card-header">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
-            <span class="card-title">ตะกร้าสินค้า</span>
-            <button class="btn-sm rust" onclick="clearCart()" style="margin-left:auto" id="clearCartBtn">ล้างทั้งหมด</button>
-          </div>
-          <div id="cartItems"><div class="empty" style="padding:24px 14px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:30px;height:30px;margin:0 auto 6px;display:block;color:var(--border)"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>ยังไม่มีสินค้าในตะกร้า</div></div>
-          <div class="cart-total" id="cartTotal" style="display:none">
-            <span class="cart-total-label">ยอดรวม</span>
-            <span class="cart-total-amount" id="cartTotalAmt">฿0</span>
-          </div>
+      <!-- แคตตาล็อกหนังสือ -->
+      <div class="card" style="margin-bottom:0">
+        <div class="card-header">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <span class="card-title">หนังสือทั้งหมด</span>
         </div>
+        <div id="shopCatalog" class="shop-grid"><div class="loading"><div class="spinner"></div>กำลังโหลด…</div></div>
+      </div>
+    </div>
 
-        <!-- Checkout Form -->
-        <div class="card" style="margin-top:14px" id="checkoutCard">
+    <!-- ═ ขั้นที่ 2: ที่อยู่ + ชำระเงิน (แยกหน้าจากการเลือกซื้อ) ═ -->
+    <div id="shopCheckoutStep" style="display:none">
+      <button class="btn-sm" onclick="backToBrowseStep()" style="margin-bottom:14px">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:12px;height:12px"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+        กลับไปเลือกซื้อสินค้า
+      </button>
+      <div class="two-col" style="align-items:start">
+        <!-- ที่อยู่ + วิธีชำระเงิน -->
+        <div class="card" id="checkoutCard">
           <div class="card-header amber">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
-            <span class="card-title">สั่งซื้อ &amp; ชำระเงิน</span>
+            <span class="card-title">ที่อยู่จัดส่ง &amp; วิธีชำระเงิน</span>
           </div>
           <div class="checkout-section">
             <label>ที่อยู่จัดส่ง
@@ -603,7 +698,7 @@
 
             <!-- โอนเงิน -->
             <div class="pay-panel" id="panelTransfer">
-              <div class="pay-hint">โอนเข้าบัญชี <strong>ธ.กรุงเทพ 123-4-56789-0</strong> ชื่อบัญชี "ร้านหนังสือ The Ledger" แล้วแนบสลิปเพื่อยืนยัน — จะแนบตอนนี้เลยหรือแนบทีหลังในหน้า "คำสั่งซื้อของฉัน" ก็ได้</div>
+              <div class="pay-hint">โอนเข้าบัญชี <strong>ธ.กรุงเทพ 123-4-56789-0</strong> ชื่อบัญชี "ร้านหนังสือ" แล้วแนบสลิปเพื่อยืนยัน — จะแนบตอนนี้เลยหรือแนบทีหลังในหน้า "คำสั่งซื้อของฉัน" ก็ได้</div>
               <div class="slip-area" onclick="document.getElementById('checkoutSlipFile').click()">
                 <input type="file" id="checkoutSlipFile" accept="image/*" style="display:none" onchange="previewCheckoutSlip(this)">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -654,11 +749,54 @@
                 ข้อมูลบัตรนี้ใช้จำลองการชำระเงินเท่านั้น ระบบไม่บันทึกหมายเลขบัตรแบบเต็ม
               </div>
             </div>
+          </div>
+        </div>
 
-            <button class="btn-primary" onclick="doCheckout()" id="checkoutBtn" disabled>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>ยืนยันคำสั่งซื้อ
-            </button>
-            <div class="form-error" id="checkoutError"></div>
+        <!-- สรุปคำสั่งซื้อ -->
+        <div style="position:sticky;top:16px">
+          <div class="card" style="margin-bottom:0">
+            <div class="card-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/></svg>
+              <span class="card-title">สรุปคำสั่งซื้อ</span>
+            </div>
+            <div id="checkoutOrderSummary" class="card-body"></div>
+            <div class="checkout-section" style="padding-top:0">
+              <button class="btn-primary" onclick="doCheckout()" id="checkoutBtn" disabled>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>ยืนยันคำสั่งซื้อ
+              </button>
+              <div class="form-error" id="checkoutError"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═ ขั้นที่ 3: หน้ารายละเอียดหนังสือ (เพจเต็ม แทน modal เดิม) ═ -->
+    <div id="shopDetailStep" style="display:none">
+      <button class="btn-sm" onclick="backToShopFromDetail()" style="margin-bottom:14px">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:12px;height:12px"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+        กลับไปเลือกซื้อสินค้า
+      </button>
+      <div class="book-detail-page">
+        <div class="book-detail-cover" id="bookDetailCover"></div>
+        <div class="book-detail-info">
+          <div class="book-detail-breadcrumb" id="bookDetailBreadcrumb"></div>
+          <h2 class="book-detail-title" id="bookDetailTitle"></h2>
+          <div class="book-detail-author" id="bookDetailAuthor"></div>
+          <div class="book-detail-badges" id="bookDetailBadges"></div>
+          <div class="book-detail-price" id="bookDetailPrice"></div>
+          <div class="book-detail-stockrow" id="bookDetailStockRow"></div>
+          <div class="book-detail-qtyrow" id="bookDetailQtyRow">
+            <span style="font-size:13px;font-weight:700;color:var(--muted)">จำนวน</span>
+            <div class="cart-qty">
+              <button type="button" onclick="changeDetailQty(-1)" aria-label="ลดจำนวน">−</button>
+              <span id="bookDetailQty">1</span>
+              <button type="button" onclick="changeDetailQty(1)" aria-label="เพิ่มจำนวน">+</button>
+            </div>
+          </div>
+          <div class="book-detail-actions">
+            <button class="btn-primary outline" id="bookDetailAddBtn" onclick="addDetailToCart()"></button>
+            <button class="btn-primary" id="bookDetailBuyBtn" onclick="buyNowFromDetail()"></button>
           </div>
         </div>
       </div>
@@ -806,8 +944,41 @@
   </div>
 </div>
 
+<!-- CUSTOMER DELIVERY DETAIL MODAL -->
+<div class="modal-overlay customer-delivery-detail-overlay" id="customerDeliveryDetailModal" onclick="if(event.target===this)closeCustomerDeliveryDetail()">
+  <div class="modal customer-delivery-detail-modal">
+    <div class="modal-header">
+      <div>
+        <span class="modal-title">ติดตามการจัดส่ง</span>
+        <small class="card-subtitle">รายละเอียดสถานะและตำแหน่งการจัดส่ง</small>
+      </div>
+      <button class="modal-close" onclick="closeCustomerDeliveryDetail()" aria-label="ปิด">×</button>
+    </div>
+    <div class="customer-delivery-detail-body" id="customerDeliveryDetailBody">
+      <div class="loading"><div class="spinner"></div>กำลังโหลดรายละเอียด…</div>
+    </div>
+  </div>
+</div>
+
+<!-- DELIVERY DETAIL MODAL -->
+<div class="modal-overlay delivery-detail-overlay" id="deliveryDetailModal" onclick="if(event.target===this)closeShipmentDetail()">
+  <div class="modal delivery-detail-modal">
+    <div class="modal-header">
+      <div>
+        <span class="modal-title">รายละเอียดงานจัดส่ง</span>
+        <small class="card-subtitle" id="deliveryDetailSub">—</small>
+      </div>
+      <button class="modal-close" onclick="closeShipmentDetail()" aria-label="ปิด">×</button>
+    </div>
+    <div class="delivery-detail-body" id="deliveryDetailBody">
+      <div class="loading"><div class="spinner"></div>กำลังโหลดรายละเอียด…</div>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="js/core.js"></script>
   <script src="js/auth.js"></script>
   <script src="js/dashboard.js"></script>
