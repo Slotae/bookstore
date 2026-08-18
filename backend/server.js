@@ -403,6 +403,44 @@ function createSession(user) {
   return token;
 }
 
+// เพิกถอน session ที่กำลังใช้งานของ user คนหนึ่งทันที (เรียกเมื่อ Admin ปิดใช้งาน/
+// เปลี่ยน role/เปลี่ยนรหัสผ่านให้ผู้ใช้คนนั้นผ่าน PATCH) — กันปัญหา token เดิมที่ login
+// ค้างอยู่ยังใช้สิทธิ์เก่าต่อได้จนกว่าจะหมดอายุเอง (8 ชม.)
+function revokeSessionsForUser(userID) {
+  for (const [token, s] of sessions) {
+    if (s.userID === userID) sessions.delete(token);
+  }
+}
+
+// ── LOGIN RATE LIMITING (in-memory, กัน brute force เดารหัสผ่าน) ────
+const loginAttempts = new Map(); // key: username (lowercase) -> {count, lockedUntil}
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOGIN_LOCKOUT_MS   = 15 * 60 * 1000; // 15 นาที
+
+function assertLoginNotLocked(username) {
+  const key = String(username).toLowerCase();
+  const rec = loginAttempts.get(key);
+  if (rec && rec.lockedUntil > Date.now()) {
+    const minsLeft = Math.ceil((rec.lockedUntil - Date.now()) / 60000);
+    throw new Error(`เข้าสู่ระบบผิดพลาดหลายครั้งเกินไป กรุณาลองใหม่อีกครั้งในอีก ${minsLeft} นาที`);
+  }
+}
+
+function recordLoginFailure(username) {
+  const key = String(username).toLowerCase();
+  const rec = loginAttempts.get(key) || { count: 0, lockedUntil: 0 };
+  rec.count += 1;
+  if (rec.count >= MAX_LOGIN_ATTEMPTS) {
+    rec.lockedUntil = Date.now() + LOGIN_LOCKOUT_MS;
+    rec.count = 0;
+  }
+  loginAttempts.set(key, rec);
+}
+
+function recordLoginSuccess(username) {
+  loginAttempts.delete(String(username).toLowerCase());
+}
+
 function getSession(req) {
   const header = req.headers["authorization"] || "";
   const token  = header.replace("Bearer ", "").trim();
@@ -435,6 +473,11 @@ setInterval(() => {
     if (v.expires < now) { sessions.delete(k); removed++; }
   }
   if (removed > 0) console.log(`  🧹 ล้าง session หมดอายุ ${removed} รายการ`);
+
+  // ล้างสถิติ login-lockout ที่หมดเวลาล็อกไปแล้ว
+  for (const [k, rec] of loginAttempts) {
+    if (rec.lockedUntil && rec.lockedUntil < now) loginAttempts.delete(k);
+  }
 }, 30 * 60 * 1000);
 
 // ── QUERIES ────────────────────────────────────────────────────────
@@ -1019,13 +1062,19 @@ async function handleApi(req, res, url) {
       const body = await readBody(req);
       if (!body.username || !body.password)
         return json(res, 400, { error: "กรุณากรอก username และ password" });
+
+      assertLoginNotLocked(body.username); // throw → 400 พร้อมข้อความเวลาที่เหลือ ถ้าโดนล็อกอยู่
+
       const rows = await query(
         "SELECT * FROM dbo.SystemUser WHERE Username=@u AND IsActive=1",
         { u: { type: sql.NVarChar(60), value: body.username } }
       );
       const user = rows[0];
-      if (!user || user.PasswordHash !== hashPwd(body.password))
+      if (!user || user.PasswordHash !== hashPwd(body.password)) {
+        recordLoginFailure(body.username);
         return json(res, 401, { error: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" });
+      }
+      recordLoginSuccess(body.username);
       const token = createSession(user);
       return json(res, 200, {
         token, userID: user.UserID, username: user.Username,
@@ -1701,6 +1750,28 @@ async function handleApi(req, res, url) {
       if (sess.role !== "Admin") return json(res, 403, { error: "ไม่มีสิทธิ์" });
       const id = Number(p.split("/").pop());
       if (!id) throw new Error("UserID ไม่ถูกต้อง");
+
+      // กันแก้บัญชีตัวเอง (ปิดใช้งาน/เปลี่ยน role ตัวเอง) — เทียบเท่าการ์ดที่มีอยู่แล้วใน DELETE
+      if ((body.isActive !== undefined || body.role) && id === sess.userID) {
+        throw new Error("ไม่สามารถปิดใช้งานหรือเปลี่ยนบทบาทบัญชีของตัวเองได้");
+      }
+
+      // กันปิดใช้งาน/ลด role ของ Admin ที่ใช้งานอยู่คนสุดท้าย (เผื่อระบบไม่มีใครล็อกอินจัดการต่อได้)
+      if (body.isActive !== undefined || body.role) {
+        const target = await query("SELECT UserID, IsActive, Role FROM dbo.SystemUser WHERE UserID=@ID",
+          { ID: { type: sql.Int, value: id } });
+        if (!target.length) throw new Error("ไม่พบผู้ใช้งานนี้");
+
+        const willDeactivate = body.isActive === false;
+        const willChangeRoleAwayFromAdmin = body.role !== undefined && body.role !== "Admin";
+
+        if (target[0].Role === "Admin" && target[0].IsActive && (willDeactivate || willChangeRoleAwayFromAdmin)) {
+          const activeAdmins = await query(
+            "SELECT COUNT(*) AS c FROM dbo.SystemUser WHERE Role=N'Admin' AND IsActive=1");
+          if (activeAdmins[0].c <= 1) throw new Error("ต้องมีบัญชี Admin ที่ใช้งานอยู่อย่างน้อย 1 คนในระบบ");
+        }
+      }
+
       if (body.isActive !== undefined) {
         await query(`UPDATE dbo.SystemUser SET IsActive=@v WHERE UserID=@ID;`,
           { ID: { type: sql.Int, value: id }, v: { type: sql.Bit, value: body.isActive?1:0 } });
@@ -1716,6 +1787,13 @@ async function handleApi(req, res, url) {
         await query(`UPDATE dbo.SystemUser SET PasswordHash=@h WHERE UserID=@ID;`,
           { ID: { type: sql.Int, value: id }, h: { type: sql.VarChar(64), value: hashPwd(body.password) } });
       }
+
+      // เพิกถอน session ที่ user คนนี้ใช้งานอยู่ทันที ถ้ามีการเปลี่ยนสถานะ/สิทธิ์/รหัสผ่าน
+      // กันปัญหา token เดิมยังใช้สิทธิ์เก่าต่อได้จนกว่าจะหมดอายุเอง (8 ชม.)
+      if (body.isActive !== undefined || body.role || body.password) {
+        revokeSessionsForUser(id);
+      }
+
       return json(res, 200, { ok: true });
     }
 

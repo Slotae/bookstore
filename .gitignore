@@ -1,0 +1,23 @@
+# Secrets — ห้าม commit ไฟล์ที่มีรหัสผ่าน/ค่าลับจริงเข้า Git เด็ดขาด
+.env
+*.env
+!.env.example
+
+# Dependencies
+node_modules/
+package-lock.json.bak
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build / temp output
+dist/
+build/
+*.tmp

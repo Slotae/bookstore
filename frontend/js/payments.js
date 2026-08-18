@@ -124,10 +124,24 @@ async function updateShipment(){
   }catch(ex){err.textContent=ex.message}
 }
 
+// [FIX] จำกัดขนาดไฟล์สลิปฝั่ง frontend ก่อนอ่าน/ส่งขึ้น server (server จำกัด body รวมไว้ที่ 5MB
+// อยู่แล้ว แต่ไม่มีการเช็คฝั่ง frontend มาก่อน ทำให้ผู้ใช้เลือกไฟล์ใหญ่เกินได้และต้องรอจน
+// upload เสร็จก่อนถึงจะโดน server ปฏิเสธ — เช็คตรงนี้ให้ fail เร็วและข้อความอ่านง่ายกว่า)
+const SLIP_MAX_BYTES = 4 * 1024 * 1024; // 4MB (เผื่อ overhead ของ base64 ~33% ให้ไม่เกิน limit 5MB ของ server)
+
 function previewSlip(input){
   const file=input.files[0];
   const label=document.getElementById('slipFileLabel');
+  const err=document.getElementById('slipError');
   if(!file){ if(label) label.textContent='คลิกหรือลากไฟล์มาวางที่นี่'; return }
+  if(file.size > SLIP_MAX_BYTES){
+    if(err) err.textContent = `ไฟล์ใหญ่เกินไป (${(file.size/1024/1024).toFixed(1)}MB) กรุณาเลือกไฟล์ไม่เกิน 4MB`;
+    input.value='';
+    if(label) label.textContent='คลิกหรือลากไฟล์มาวางที่นี่';
+    document.getElementById('slipPreview').style.display='none';
+    return;
+  }
+  if(err) err.textContent='';
   if(label) label.textContent=file.name;
   const reader=new FileReader();
   reader.onload=e=>{const img=document.getElementById('slipPreview');img.src=e.target.result;img.style.display='block';};
@@ -160,6 +174,7 @@ async function uploadSlip(){
   const file=document.getElementById('slipFile').files[0];
   if(!payId){err.textContent='กรุณาเลือกรายการชำระเงิน';return}
   if(!file){err.textContent='กรุณาเลือกไฟล์สลิป';return}
+  if(file.size > SLIP_MAX_BYTES){err.textContent=`ไฟล์ใหญ่เกินไป (${(file.size/1024/1024).toFixed(1)}MB) กรุณาเลือกไฟล์ไม่เกิน 4MB`;return}
   try{
     const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(file);});
     await api(`/api/payments/${payId}`,{method:'PATCH',body:JSON.stringify({slip:b64})});
