@@ -538,3 +538,137 @@ JOIN dbo.Payment p  ON p.OrderID = o.OrderID
 JOIN dbo.Shipment s ON s.OrderID = o.OrderID
 ORDER BY o.OrderID;
 GO
+
+-- ══════════════════════════════════════════════════════════════════
+-- 15. VIEW (นำ Query ที่เรียกใช้บ่อยและไม่มีพารามิเตอร์ มาห่อเป็น View
+--     เพื่อให้เรียกใช้ง่ายขึ้นและซ่อนความซับซ้อนของ JOIN หลายตาราง
+--     ตามที่กล่าวถึงในรายงานหัวข้อ 3.8 — ต่อยอดจาก Query 11 และ Query 12)
+-- ══════════════════════════════════════════════════════════════════
+IF OBJECT_ID(N'dbo.vw_BookSalesSummary', N'V') IS NOT NULL DROP VIEW dbo.vw_BookSalesSummary;
+GO
+-- 15.1 หนังสือทุกเล่มพร้อมยอดขายสะสม (ต่อยอดจาก Query 11 — หัวข้อ 3.7 กลุ่มที่ 3)
+CREATE VIEW dbo.vw_BookSalesSummary AS
+SELECT
+    b.ISBN,
+    b.BookName,
+    b.Price,
+    b.Stock,
+    ISNULL((SELECT STRING_AGG(c.CategoryName, N', ')
+            FROM dbo.Book_Category bc JOIN dbo.Category c ON c.CategoryID = bc.CategoryID
+            WHERE bc.ISBN = b.ISBN), N'-')                          AS Categories,
+    ISNULL(SUM(od.Quantity), 0)                                     AS TotalQtySold,
+    ISNULL(SUM(od.Quantity * od.UnitPrice), 0)                      AS TotalRevenue
+FROM dbo.Book b
+LEFT JOIN dbo.Order_Detail od ON od.ISBN = b.ISBN
+GROUP BY b.ISBN, b.BookName, b.Price, b.Stock;
+GO
+
+IF OBJECT_ID(N'dbo.vw_CustomerOrderSummary', N'V') IS NOT NULL DROP VIEW dbo.vw_CustomerOrderSummary;
+GO
+-- 15.2 ลูกค้าทุกคนพร้อมจำนวนคำสั่งซื้อและยอดใช้จ่ายสะสม (ต่อยอดจาก Query 12 — หัวข้อ 3.7 กลุ่มที่ 2)
+--      LEFT JOIN สองชั้นให้ลูกค้าที่ยังไม่เคยซื้อก็ติดมาด้วย (เป็น 0 แทนที่จะหาย)
+CREATE VIEW dbo.vw_CustomerOrderSummary AS
+SELECT
+    cu.CustomerID,
+    cu.CustomerName,
+    cu.Phone,
+    COUNT(DISTINCT o.OrderID)                    AS OrderCount,
+    ISNULL(SUM(od.Quantity * od.UnitPrice), 0)   AS TotalSpent
+FROM dbo.Customer cu
+LEFT JOIN dbo.Orders o       ON o.CustomerID = cu.CustomerID
+LEFT JOIN dbo.Order_Detail od ON od.OrderID  = o.OrderID
+GROUP BY cu.CustomerID, cu.CustomerName, cu.Phone;
+GO
+
+-- 15.3 ทดสอบเรียกใช้ View ทั้งสองตัว (ใช้แคปภาพหน้าจอที่ 3.5 ในรายงาน)
+SELECT * FROM dbo.vw_BookSalesSummary ORDER BY TotalRevenue DESC;
+GO
+SELECT * FROM dbo.vw_CustomerOrderSummary ORDER BY TotalSpent DESC;
+GO
+
+
+-- ══════════════════════════════════════════════════════════════════
+-- 16. STORED PROCEDURE (แปลง logic การสั่งซื้อจาก createOrder() ในไฟล์
+--     server.js ให้เป็น Stored Procedure ระดับฐานข้อมูล ตามที่กล่าวถึง
+--     ในรายงานหัวข้อ 3.9 — สาธิต 1 คำสั่งซื้อ 1 รายการหนังสือ พร้อม
+--     UPDLOCK/ROWLOCK และ TRY/CATCH + ROLLBACK เหมือนที่ทดสอบไว้แล้ว
+--     ในหัวข้อ 3.12.2.2–3.12.2.3 (ภาพที่ 3.1–3.3)
+-- ══════════════════════════════════════════════════════════════════
+IF OBJECT_ID(N'dbo.sp_CreateOrder', N'P') IS NOT NULL DROP PROCEDURE dbo.sp_CreateOrder;
+GO
+CREATE PROCEDURE dbo.sp_CreateOrder
+    @CustomerID INT,
+    @ISBN       VARCHAR(20),
+    @Quantity   INT,
+    @Address    NVARCHAR(300) = N'รับที่ร้าน',
+    @NewOrderID INT OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        IF @Quantity <= 0
+            THROW 50001, N'จำนวนหนังสือต้องมากกว่า 0', 1;
+
+        BEGIN TRANSACTION;
+
+        -- ล็อกแถวหนังสือก่อนตรวจสต็อก ป้องกันการสั่งซื้อซ้อนกัน (เทียบเท่า UPDLOCK/ROWLOCK
+        -- ที่ createOrder() ใน server.js ใช้จริง)
+        DECLARE @Stock INT, @Price DECIMAL(10,2);
+        SELECT @Stock = Stock, @Price = Price
+        FROM dbo.Book WITH (UPDLOCK, ROWLOCK)
+        WHERE ISBN = @ISBN;
+
+        IF @Stock IS NULL
+            THROW 50002, N'ไม่พบ ISBN ที่ระบุ', 1;
+        IF @Stock < @Quantity
+            THROW 50003, N'สต็อกไม่เพียงพอสำหรับจำนวนที่สั่ง', 1;
+
+        INSERT INTO dbo.Orders (OrderDate, CustomerID)
+        VALUES (CAST(GETDATE() AS date), @CustomerID);
+        SET @NewOrderID = SCOPE_IDENTITY();
+
+        INSERT INTO dbo.Order_Detail (OrderID, ISBN, Quantity, UnitPrice)
+        VALUES (@NewOrderID, @ISBN, @Quantity, @Price);
+
+        UPDATE dbo.Book SET Stock = Stock - @Quantity WHERE ISBN = @ISBN;
+
+        INSERT INTO dbo.Payment (PaymentDate, Amount, PaymentMethod, PaymentStatus, OrderID)
+        VALUES (NULL, @Price * @Quantity, N'โอน', N'รอชำระ', @NewOrderID);
+
+        INSERT INTO dbo.Shipment (ShipDate, TrackingNo, Status, Address, OrderID)
+        VALUES (CAST(GETDATE() AS date),
+                'TH' + LEFT(REPLACE(CONVERT(VARCHAR(36), NEWID()), '-', ''), 10),
+                N'รอจัดส่ง', @Address, @NewOrderID);
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
+END
+GO
+
+-- 16.1 ทดสอบกรณีสำเร็จ (COMMIT) — ใช้แคปภาพหน้าจอที่ 3.6 ในรายงาน
+DECLARE @OutOrderID1 INT;
+EXEC dbo.sp_CreateOrder
+    @CustomerID = 4,
+    @ISBN       = '9786160000059',
+    @Quantity   = 2,
+    @NewOrderID = @OutOrderID1 OUTPUT;
+SELECT @OutOrderID1 AS NewOrderID;
+GO
+
+-- 16.2 ทดสอบกรณีล้มเหลว (ROLLBACK) — สั่งเกินสต็อกโดยตั้งใจ ใช้แคปภาพหน้าจอที่ 3.7 ในรายงาน
+DECLARE @OutOrderID2 INT;
+BEGIN TRY
+    EXEC dbo.sp_CreateOrder
+        @CustomerID = 8,
+        @ISBN       = '9786160000080',
+        @Quantity   = 999,
+        @NewOrderID = @OutOrderID2 OUTPUT;
+END TRY
+BEGIN CATCH
+    PRINT N'สั่งซื้อไม่สำเร็จ (ตามที่ตั้งใจ): ' + ERROR_MESSAGE();
+END CATCH
+GO

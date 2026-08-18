@@ -15,9 +15,22 @@ function selectPayMethod(method) {
   document.getElementById('checkoutError').textContent = '';
 }
 
+// [FIX] จำกัดขนาดไฟล์สลิปฝั่ง frontend ก่อนอ่าน/ส่งขึ้น server (จุดเดียวกับที่แก้ไว้ใน payments.js —
+// เดิมมีแค่จุดเดียว จุดแนบสลิปตอน checkout นี้หลุดไป ทำให้ผู้ใช้เลือกไฟล์ใหญ่เกินได้และไปโดน
+// server (limit 5MB) ปฏิเสธตอนกดยืนยันคำสั่งซื้อแทน ใช้ SLIP_MAX_BYTES ตัวเดียวกับ payments.js ที่ประกาศไว้ใน core.js)
 function previewCheckoutSlip(input) {
   const file = input.files[0];
+  const err  = document.getElementById('checkoutSlipError');
+  if (err) err.textContent = '';
   if (!file) return;
+  if (file.size > SLIP_MAX_BYTES) {
+    if (err) err.textContent = `ไฟล์ใหญ่เกินไป (${(file.size/1024/1024).toFixed(1)}MB) กรุณาเลือกไฟล์ไม่เกิน 4MB`;
+    input.value = '';
+    checkoutSlipBase64 = null;
+    document.getElementById('checkoutSlipPreview').style.display = 'none';
+    document.getElementById('checkoutSlipLabel').textContent = 'แตะเพื่อเลือกไฟล์สลิป (ไม่บังคับตอนนี้)';
+    return;
+  }
   const r = new FileReader();
   r.onload = e => {
     checkoutSlipBase64 = e.target.result;

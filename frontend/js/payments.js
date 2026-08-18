@@ -124,10 +124,8 @@ async function updateShipment(){
   }catch(ex){err.textContent=ex.message}
 }
 
-// [FIX] จำกัดขนาดไฟล์สลิปฝั่ง frontend ก่อนอ่าน/ส่งขึ้น server (server จำกัด body รวมไว้ที่ 5MB
-// อยู่แล้ว แต่ไม่มีการเช็คฝั่ง frontend มาก่อน ทำให้ผู้ใช้เลือกไฟล์ใหญ่เกินได้และต้องรอจน
-// upload เสร็จก่อนถึงจะโดน server ปฏิเสธ — เช็คตรงนี้ให้ fail เร็วและข้อความอ่านง่ายกว่า)
-const SLIP_MAX_BYTES = 4 * 1024 * 1024; // 4MB (เผื่อ overhead ของ base64 ~33% ให้ไม่เกิน limit 5MB ของ server)
+// [FIX] จำกัดขนาดไฟล์สลิปฝั่ง frontend ก่อนอ่าน/ส่งขึ้น server — ค่าคงที่ SLIP_MAX_BYTES
+// ย้ายไปประกาศรวมไว้ที่ core.js แล้ว (โหลดก่อนไฟล์นี้เสมอ) เพื่อให้ทุกจุดอัปโหลดสลิปใช้ค่าเดียวกัน
 
 function previewSlip(input){
   const file=input.files[0];

@@ -16,7 +16,7 @@ const sql    = require("mssql");
 const crypto = require("node:crypto");
 
 // ── LOAD .env ──────────────────────────────────────────────────────
-// [FIX-1] ไฟล์ต้องชื่อ .env เท่านั้น — rename จาก _env → .env ก่อนรัน
+// ไฟล์ต้องชื่อ .env เท่านั้น — rename จาก _env → .env ก่อนรัน
 function loadEnv() {
   const envPath = path.join(__dirname, ".env");
   if (!fs.existsSync(envPath)) return;
@@ -80,7 +80,7 @@ const dbConfig = {
 if (process.env.DB_PORT)   dbConfig.port = Number(process.env.DB_PORT);
 else if (!instanceName)     dbConfig.port = 1433;
 
-// [FIX-11] Auto-cancel order ที่ค้างชำระนานเกินกำหนด (ยังไม่แนบสลิป/ยังไม่ชำระเลย)
+// Auto-cancel order ที่ค้างชำระนานเกินกำหนด (ยังไม่แนบสลิป/ยังไม่ชำระเลย)
 //         ตั้งค่าได้ผ่าน ENV: ORDER_AUTO_CANCEL_DAYS (ค่าเริ่มต้น 3 วัน)
 //                             ORDER_AUTO_CANCEL_CHECK_MINUTES (ค่าเริ่มต้น 60 นาที)
 const ORDER_AUTO_CANCEL_DAYS          = Number(process.env.ORDER_AUTO_CANCEL_DAYS || 3);
@@ -100,7 +100,7 @@ function json(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-// [FIX-4] readBody: แสดง error ชัดเจนเมื่อ body เกินขนาด แทนการ destroy เงียบๆ
+// readBody: แสดง error ชัดเจนเมื่อ body เกินขนาด แทนการ destroy เงียบๆ
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -127,7 +127,7 @@ async function query(sql_text, inputs = {}) {
   return result.recordset || [];
 }
 
-// [FIX-5] today(): ใช้ timezone Asia/Bangkok (UTC+7) แทน UTC
+// today(): ใช้ timezone Asia/Bangkok (UTC+7) แทน UTC
 // ป้องกันวันที่คลาดเคลื่อนก่อน 07:00 น. เมื่อ server รันที่ UTC+0
 function today() {
   return new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Bangkok" });
@@ -162,9 +162,9 @@ function hashPwd(pwd) {
 }
 
 // ── AUTO-CANCEL UNPAID ORDERS ────────────────────────────────────────
-// [FIX-11] ยกเลิกคำสั่งซื้ออัตโนมัติเมื่อ "ค้างชำระ" (PaymentStatus = รอชำระ คือยังไม่แนบสลิปเลย)
+// ยกเลิกคำสั่งซื้ออัตโนมัติเมื่อ "ค้างชำระ" (PaymentStatus = รอชำระ คือยังไม่แนบสลิปเลย)
 //         นานเกิน ORDER_AUTO_CANCEL_DAYS วัน และยังไม่ถูกดำเนินการจัดส่ง (Status = รอจัดส่ง)
-// [FIX-12] ครอบคลุมเคส "ปฏิเสธ" ด้วย (สลิปถูกปฏิเสธแล้วลูกค้าไม่แนบใหม่) — เดิมช่องนี้ตกหล่น
+// ครอบคลุมเคส "ปฏิเสธ" ด้วย (สลิปถูกปฏิเสธแล้วลูกค้าไม่แนบใหม่) — เดิมช่องนี้ตกหล่น
 //         เพราะเช็คแค่ PaymentStatus = 'รอชำระ' ทำให้ออเดอร์ที่ถูกปฏิเสธค้างอยู่ตลอดไปไม่มีวันโดนเก็บกวาด
 //         นับวันของเคส "ปฏิเสธ" จาก RejectedAt (วันที่ถูกปฏิเสธ) ไม่ใช่ OrderDate เดิม เพราะลูกค้าควรมีเวลา
 //         แนบสลิปใหม่นับจากวันที่ถูกปฏิเสธจริง ไม่ใช่โดนนับเวลาย้อนไปตั้งแต่วันสั่งซื้อ (จะไม่ยุติธรรม/อาจตัดสิทธิ์ทันที)
@@ -291,7 +291,7 @@ async function ensureUsersTable() {
   // ถ้ายังไม่มี user เลย (ตารางว่าง) ให้สร้างบัญชีเริ่มต้นให้
   const countRows = await pool.request().query(`SELECT COUNT(*) AS c FROM dbo.SystemUser;`);
   if (countRows.recordset[0].c === 0) {
-    // [FIX-2] ใช้ parameterized query แทน string interpolation — ป้องกัน SQL Injection pattern
+    // ใช้ parameterized query แทน string interpolation — ป้องกัน SQL Injection pattern
     const adminHash    = hashPwd("admin1234");
     const staffHash    = hashPwd("staff1234");
     const delivHash    = hashPwd("delivery1234");
@@ -455,7 +455,7 @@ function requireAuth(req, res) {
   return sess;
 }
 
-// [FIX-6] Role-based authorization helper — ใช้ตรวจสิทธิ์ตาม Business Rule ที่ว่า
+// Role-based authorization helper — ใช้ตรวจสิทธิ์ตาม Business Rule ที่ว่า
 // "ลูกค้าและพนักงานสามารถเข้าถึงข้อมูลได้เฉพาะส่วนที่ตรงกับสิทธิ์ของบทบาทตนเองเท่านั้น"
 // คืนค่า true ถ้าอนุญาต, false + ส่ง 403 กลับไปแล้วถ้าไม่มีสิทธิ์
 function requireRole(sess, res, allowedRoles) {
@@ -464,7 +464,7 @@ function requireRole(sess, res, allowedRoles) {
   return false;
 }
 
-// [FIX-3] Session cleanup: ล้าง session ที่หมดอายุออกจาก memory ทุก 30 นาที
+// Session cleanup: ล้าง session ที่หมดอายุออกจาก memory ทุก 30 นาที
 //          ป้องกัน memory leak บน server ที่รันต่อเนื่องนานๆ
 setInterval(() => {
   const now = Date.now();
@@ -772,7 +772,7 @@ async function ensureCancelNoteColumn() {
   `);
 }
 
-// ── [FIX-12] ENSURE RejectedAt COLUMN ───────────────────────────────
+// ── ENSURE RejectedAt COLUMN ─────────────────────────────────────────
 // เก็บวันที่สลิปถูก "ปฏิเสธ" ครั้งล่าสุด ไว้ใช้เป็นจุดเริ่มนับวันสำหรับ auto-cancel
 // (แยกจาก OrderDate เพราะออเดอร์อาจถูกปฏิเสธหลังสั่งซื้อไปแล้วหลายวัน)
 async function ensureRejectedAtColumn() {
@@ -832,7 +832,7 @@ async function createOrder(input) {
     }
 
     const paymentMethod = input.paymentMethod || "โอน";
-    // [FIX-14] "บัตร" ตัดเงินจริงทันทีตอน checkout (จำลองอนุมัติบัตรฝั่งหน้าเว็บแล้ว) และไม่มีช่อง
+    // "บัตร" ตัดเงินจริงทันทีตอน checkout (จำลองอนุมัติบัตรฝั่งหน้าเว็บแล้ว) และไม่มีช่อง
     // แนบสลิปให้ลูกค้าใช้เลย ถ้ายังตั้งเป็น "รอชำระ" เหมือนช่องทางอื่นจะค้างรอสลิปที่ไม่มีวันมาถึง
     // จึงบันทึกเป็น "ยืนยันแล้ว" พร้อมวันที่จ่ายทันทีเฉพาะกรณีบัตรเท่านั้น
     const isCardPaid = paymentMethod === "บัตร";
@@ -1145,7 +1145,7 @@ async function handleApi(req, res, url) {
     }
 
     // ── หน้าร้าน (public) ──
-    // [FIX-11] เปิดให้ทุกคนดูรายการหนังสือได้โดยไม่ต้องล็อกอิน (ดูสินค้าได้เลย)
+    // เปิดให้ทุกคนดูรายการหนังสือได้โดยไม่ต้องล็อกอิน (ดูสินค้าได้เลย)
     // จะบังคับล็อกอินเฉพาะตอนยืนยันคำสั่งซื้อ (POST /api/orders) ซึ่งยังอยู่หลัง requireAuth ด้านล่าง
     if (method === "GET" && p === "/api/books") return json(res, 200, await getBooks());
 
@@ -1432,7 +1432,7 @@ async function handleApi(req, res, url) {
     if (method === "POST" && p === "/api/orders") {
       if (!requireRole(sess, res, ["Admin","พนักงานขาย","ลูกค้า"])) return;
       if (sess.role === "ลูกค้า") {
-        // [FIX-7] บังคับ customerId ให้ตรงกับบัญชีที่ล็อกอินอยู่เสมอ
+        // บังคับ customerId ให้ตรงกับบัญชีที่ล็อกอินอยู่เสมอ
         // ป้องกันลูกค้าคนหนึ่งยิง API ตรงๆ เพื่อสั่งซื้อในนามลูกค้าคนอื่น
         if (!sess.customerID) throw new Error("ไม่พบข้อมูลลูกค้าของบัญชีนี้");
         body.customerId = sess.customerID;
@@ -1528,7 +1528,7 @@ async function handleApi(req, res, url) {
       const pay = await query("SELECT SlipImage, OrderID, PaymentMethod FROM dbo.Payment WHERE PaymentID=@ID",
         { ID: { type: sql.Int, value: id } });
       if (!pay.length) throw new Error("ไม่พบรายการชำระเงิน");
-      // [FIX-9] ต้องมีหลักฐานก่อนยืนยันสำหรับ "โอน" และ "บัตร" (มีสลิป/ใบเสร็จ POS ให้แนบได้จริง เก็บไว้กระทบยอด/กันโต้แย้งภายหลัง)
+      // ต้องมีหลักฐานก่อนยืนยันสำหรับ "โอน" และ "บัตร" (มีสลิป/ใบเสร็จ POS ให้แนบได้จริง เก็บไว้กระทบยอด/กันโต้แย้งภายหลัง)
       // "เงินสด" (ชำระหน้าร้าน) และ "ปลายทาง" (COD) เท่านั้นที่ยกเว้น เพราะนับต่อหน้าเป็นจุดสิ้นสุด ไม่มีอะไรให้ตรวจย้อนหลัง
       const NO_PROOF_METHODS = ["เงินสด", "ปลายทาง"];
       if (body.status === "ยืนยันแล้ว" && !NO_PROOF_METHODS.includes(pay[0].PaymentMethod) && !pay[0].SlipImage)
@@ -1539,7 +1539,7 @@ async function handleApi(req, res, url) {
       await tx2.begin();
       try {
         // อัปเดต PaymentStatus
-        // [FIX-12] ตั้ง RejectedAt เมื่อปฏิเสธ (ใช้เป็นจุดเริ่มนับวันสำหรับ auto-cancel)
+        // ตั้ง RejectedAt เมื่อปฏิเสธ (ใช้เป็นจุดเริ่มนับวันสำหรับ auto-cancel)
         //          และล้างทิ้งเมื่อสถานะเปลี่ยนไปเป็นอย่างอื่น (เช่น ลูกค้าแนบสลิปใหม่ → รอตรวจสอบ)
         await new sql.Request(tx2)
           .input("ID",     sql.Int,          id)
@@ -1571,7 +1571,7 @@ async function handleApi(req, res, url) {
           }
         }
 
-        // [FIX-13] ปฏิเสธเงินสด/ปลายทาง (NO_PROOF_METHODS) → ยกเลิกออเดอร์ทันที ไม่ต้องรอ auto-cancel 3 วัน
+        // ปฏิเสธเงินสด/ปลายทาง (NO_PROOF_METHODS) → ยกเลิกออเดอร์ทันที ไม่ต้องรอ auto-cancel 3 วัน
         //          เพราะฝั่งลูกค้าไม่มีปุ่มแนบสลิปให้แก้ไขอยู่แล้ว (การปฏิเสธเป็นการตัดสินใจฝ่ายเดียวของพนักงาน)
         //          รอ 3 วันไปก็ไม่มีอะไรเปลี่ยน จึงคืนสต็อกและยกเลิกให้เลยเพื่อไม่ให้ order ค้างเก้อ
         if (body.status === "ปฏิเสธ" && NO_PROOF_METHODS.includes(pay[0].PaymentMethod)) {
@@ -1623,7 +1623,7 @@ async function handleApi(req, res, url) {
       }
 
       // แนบสลิปแล้ว = เข้าสถานะ "รอตรวจสอบ" และบันทึกวันที่แนบสลิปจริง (ไม่ใช่ถือว่าจ่ายแล้วทันที)
-      // [FIX-12] ล้าง RejectedAt ทิ้ง เพราะลูกค้าดำเนินการแนบสลิปใหม่แล้ว ไม่นับว่า "ค้างหลังโดนปฏิเสธ" อีกต่อไป
+      // ล้าง RejectedAt ทิ้ง เพราะลูกค้าดำเนินการแนบสลิปใหม่แล้ว ไม่นับว่า "ค้างหลังโดนปฏิเสธ" อีกต่อไป
       await query(`UPDATE dbo.Payment
                    SET SlipImage=@Slip, PaymentStatus=N'รอตรวจสอบ', PaymentDate=@PaymentDate, RejectedAt=NULL
                    WHERE PaymentID=@ID;`,
@@ -1660,7 +1660,7 @@ async function handleApi(req, res, url) {
     // PATCH ORDER CANCEL (ลูกค้ายกเลิกคำสั่งซื้อ — เฉพาะสถานะ รอจัดส่ง)
     if (method === "PATCH" && p.startsWith("/api/orders/") && p.endsWith("/cancel")) {
       const id = Number(p.split("/")[3]);
-      // [FIX-12] หมายเหตุการยกเลิก (ไม่บังคับ) — จำกัดความยาวกันข้อมูลล้น column NVARCHAR(500)
+      // หมายเหตุการยกเลิก (ไม่บังคับ) — จำกัดความยาวกันข้อมูลล้น column NVARCHAR(500)
       const cancelNote = typeof body.note === "string" ? body.note.trim().slice(0, 500) : null;
       // ตรวจสอบว่า order นี้เป็นของ user คนนี้ (กรณีลูกค้า)
       if (sess.role === "ลูกค้า") {
@@ -1869,7 +1869,7 @@ function serveStatic(req, res, url) {
     await ensureDeliveryWorkflow();
     console.log("  ✅ ตรวจสอบ/ปรับโครงสร้างฐานข้อมูลเรียบร้อย");
 
-    // [FIX-11] เริ่มระบบยกเลิกออเดอร์ค้างชำระอัตโนมัติ
+    // เริ่มระบบยกเลิกออเดอร์ค้างชำระอัตโนมัติ
     startAutoCancelScheduler();
     console.log(`  ⏱️  Auto-cancel: ตรวจสอบทุก ${ORDER_AUTO_CANCEL_CHECK_MINUTES} นาที (ยกเลิกออเดอร์ค้างชำระเกิน ${ORDER_AUTO_CANCEL_DAYS} วัน)`);
 

@@ -2,6 +2,9 @@
 // CORE — shared state, API, tabs, loading, and render helpers
 // ================================================================
 const money = new Intl.NumberFormat('th-TH',{style:'currency',currency:'THB'});
+// [FIX] จำกัดขนาดไฟล์สลิปฝั่ง frontend ก่อนอ่าน/ส่งขึ้น server (server จำกัด body รวมไว้ที่ 5MB)
+// อยู่ที่ core.js (โหลดก่อนไฟล์อื่นทั้งหมด) เพื่อให้ทุกจุดที่อัปโหลดสลิป (payments.js, checkout.js) ใช้ค่าเดียวกัน
+const SLIP_MAX_BYTES = 4 * 1024 * 1024; // 4MB (เผื่อ overhead ของ base64 ~33% ให้ไม่เกิน limit 5MB ของ server)
 let TOKEN = localStorage.getItem('bms_token') || '';
 let ME    = JSON.parse(localStorage.getItem('bms_me') || 'null');
 const state = {customers:[],books:[],orders:[],payments:[],shipments:[],users:[],dashboard:null,
