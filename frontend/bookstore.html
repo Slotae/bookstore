@@ -12,8 +12,16 @@
 </head>
 <body>
 
+<!-- ══ SESSION LOADING (กันจังหวะกระพริบ/กันเด้งขณะเช็ค session เดิม) ══ -->
+<div class="screen" id="sessionLoadingScreen">
+  <div style="text-align:center">
+    <div class="spinner" style="width:34px;height:34px;border-width:3.5px;margin-bottom:14px"></div>
+    <div style="color:rgba(255,255,255,.75);font-size:13.5px;font-weight:600">กำลังโหลด…</div>
+  </div>
+</div>
+
 <!-- ══ LOGIN SCREEN ════════════════════════════════════════════════ -->
-<div class="screen" id="loginScreen">
+<div class="screen hidden" id="loginScreen">
   <div class="auth-card">
     <div class="auth-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -23,19 +31,20 @@
     <div class="auth-title">Bookstore System</div>
     <div class="auth-sub">ระบบบริหารจัดการร้านขายหนังสือ</div>
     <label>ชื่อผู้ใช้งาน <input id="loginUser" placeholder="username" autocomplete="username"></label>
-    <label>รหัสผ่าน <input id="loginPass" type="password" placeholder="password" autocomplete="current-password"></label>
+    <label>รหัสผ่าน
+      <div class="pw-wrap">
+        <input id="loginPass" type="password" placeholder="password" autocomplete="current-password">
+        <button type="button" class="pw-toggle" onclick="togglePw('loginPass',this)" aria-label="แสดง/ซ่อนรหัสผ่าน" tabindex="-1">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
+    </label>
     <button class="btn-auth" onclick="doLogin()" id="loginSubmitBtn">เข้าสู่ระบบ</button>
     <div class="auth-error" id="loginError"></div>
     <div class="auth-divider">หรือ</div>
     <button class="btn-auth outline" onclick="showRegister()">
       สมัครสมาชิกลูกค้าใหม่
     </button>
-    <div class="auth-hint">
-      <strong>บัญชีเจ้าหน้าที่:</strong><br>
-      Admin → admin / admin1234<br>
-      พนักงานขาย → staff1 / staff1234<br>
-      พนักงานจัดส่ง → delivery1 / delivery1234
-    </div>
   </div>
 </div>
 
@@ -50,17 +59,66 @@
     </div>
     <div class="auth-title">สมัครสมาชิก</div>
     <div class="auth-sub">เปิดบัญชีลูกค้าใหม่ของร้าน</div>
-    <label>ชื่อ-สกุล <input id="regName" placeholder="เช่น นภัสสร ใจดี" required></label>
-    <label>เบอร์โทรศัพท์ <input id="regPhone" type="tel" inputmode="numeric" pattern="0[0-9\-]{8,11}" title="ขึ้นต้นด้วย 0 ตามด้วยตัวเลข 8-9 หลัก (มีขีดคั่นได้) เช่น 081-234-5678" placeholder="เช่น 081-234-5678" required></label>
-    <label>อีเมล <input id="regEmail" type="email" placeholder="เช่น you@mail.com"></label>
-    <label>ที่อยู่จัดส่ง <textarea id="regAddress" placeholder="บ้านเลขที่, ถนน, ตำบล, อำเภอ, จังหวัด" style="min-height:72px" required></textarea></label>
-    <div class="auth-divider" style="margin:4px 0">ตั้งรหัสผ่าน (สำหรับเข้าสู่ระบบ)</div>
-    <label>Username <input id="regUser" placeholder="เช่น napasorn123" required></label>
-    <label>รหัสผ่าน <input id="regPass" type="password" placeholder="อย่างน้อย 6 ตัวอักษร" required></label>
-    <label>ยืนยันรหัสผ่าน <input id="regPass2" type="password" placeholder="กรอกซ้ำ" required></label>
-    <button class="btn-auth" onclick="doRegister()" id="registerSubmitBtn">สมัครสมาชิก</button>
-    <div class="auth-error" id="registerError"></div>
-    <button class="btn-auth outline" onclick="showLogin()">← กลับเข้าสู่ระบบ</button>
+
+    <!-- ตัวบอกขั้นตอน -->
+    <div class="auth-steps">
+      <div class="auth-step-dot active" id="regStepDot1"><span>1</span></div>
+      <div class="auth-step-line" id="regStepLine"></div>
+      <div class="auth-step-dot" id="regStepDot2"><span>2</span></div>
+    </div>
+    <div class="auth-step-label" id="regStepLabel">ขั้นตอน 1 จาก 2 — ข้อมูลส่วนตัว</div>
+
+    <!-- ── ขั้นที่ 1: ข้อมูลส่วนตัว ── -->
+    <div class="auth-step-panel active" id="regPanel1">
+      <label>ชื่อ-สกุล <input id="regName" placeholder="เช่น นภัสสร ใจดี" required></label>
+      <label>เบอร์โทรศัพท์ <input id="regPhone" type="tel" inputmode="numeric" pattern="0[0-9\-]{8,11}" title="ขึ้นต้นด้วย 0 ตามด้วยตัวเลข 8-9 หลัก (มีขีดคั่นได้) เช่น 081-234-5678" placeholder="เช่น 081-234-5678" required></label>
+      <label>อีเมล <input id="regEmail" type="email" placeholder="เช่น you@mail.com"></label>
+      <label>ที่อยู่จัดส่ง <textarea id="regAddress" placeholder="บ้านเลขที่, ถนน, ตำบล, อำเภอ, จังหวัด" style="min-height:72px" required></textarea></label>
+      <div class="auth-error" id="regStep1Error"></div>
+      <button type="button" class="btn-auth" onclick="goToRegStep(2)">ถัดไป →</button>
+    </div>
+
+    <!-- ── ขั้นที่ 2: ตั้งรหัสผ่าน ── -->
+    <div class="auth-step-panel" id="regPanel2">
+      <label>Username <input id="regUser" placeholder="เช่น napasorn123" required></label>
+      <label>รหัสผ่าน
+        <div class="pw-wrap">
+          <input id="regPass" type="password" placeholder="อย่างน้อย 6 ตัวอักษร" required oninput="checkRegPwMatch()">
+          <button type="button" class="pw-toggle" onclick="togglePw('regPass',this)" aria-label="แสดง/ซ่อนรหัสผ่าน" tabindex="-1">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </label>
+      <label>ยืนยันรหัสผ่าน
+        <div class="pw-wrap">
+          <input id="regPass2" type="password" placeholder="กรอกซ้ำ" required oninput="checkRegPwMatch()">
+          <button type="button" class="pw-toggle" onclick="togglePw('regPass2',this)" aria-label="แสดง/ซ่อนรหัสผ่าน" tabindex="-1">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </label>
+      <div class="auth-field-hint" id="regPwMatchHint"></div>
+      <button class="btn-auth" onclick="doRegister()" id="registerSubmitBtn">สมัครสมาชิก</button>
+      <div class="auth-error" id="registerError"></div>
+      <button type="button" class="btn-auth outline" onclick="goToRegStep(1)">← ย้อนกลับ</button>
+    </div>
+
+    <button class="btn-auth outline" style="margin-top:6px" onclick="showLogin()">← กลับเข้าสู่ระบบ</button>
+  </div>
+</div>
+
+<!-- ══ AUTH SUCCESS MODAL (login / register) ══════════════════════════ -->
+<div class="modal-overlay" id="authSuccessModal">
+  <div class="modal success-modal">
+    <div class="success-check-wrap" id="authSuccessCheckWrap">
+      <div class="success-badge">
+        <svg class="success-check" viewBox="0 0 44 44">
+          <path class="success-check-mark" d="M12 23l7 7 13-13"/>
+        </svg>
+      </div>
+    </div>
+    <h3 style="text-align:center" id="authSuccessTitle">เข้าสู่ระบบสำเร็จ</h3>
+    <p style="text-align:center;color:var(--muted);font-size:13.5px;margin:4px 0 0" id="authSuccessSub">กำลังพาไปยังหน้าหลัก…</p>
   </div>
 </div>
 
@@ -241,7 +299,7 @@
           <span class="card-title">คลังหนังสือทั้งหมด</span>
         </div>
         <div class="toolbar">
-          <input type="text" id="bookSearch" placeholder="ค้นหาชื่อหนังสือ… (Query 2 จริง)" oninput="liveBookKeyword(this.value); renderBooks()">
+          <input type="text" id="bookSearch" placeholder="ค้นหาชื่อหนังสือหรือ ISBN… (Query 2 จริง)" oninput="liveBookKeyword(this.value); renderBooks()">
           <input type="number" id="bookMinPrice" placeholder="ราคาขั้นต่ำ" min="0" style="width:110px" oninput="liveBookPrice(this.valueAsNumber||0); renderBooks()">
           <select id="bookSort" onchange="renderBooks()">
             <option value="name">เรียงตามชื่อ</option>
@@ -260,7 +318,7 @@
           </div>
           <div class="card-body pad">
             <form id="bookForm">
-              <label>ISBN (10–13 หลัก) <input name="isbn" id="bookFormIsbn" placeholder="เช่น 9786160000011" required minlength="10" maxlength="20" pattern="[0-9Xx\-]{10,20}" title="ตัวเลข 10-13 หลัก (มีขีดคั่นได้)"></label>
+              <label>ISBN (10–13 หลัก) <input name="isbn" id="bookFormIsbn" placeholder="เช่น 9786160000012" required minlength="10" maxlength="20" pattern="[0-9Xx\-]{10,20}" title="ตัวเลข 10-13 หลัก (มีขีดคั่นได้)"></label>
               <label>ชื่อหนังสือ <input name="bookName" placeholder="เช่น Node.js สำหรับระบบร้านค้า" required></label>
               <label>ราคา (บาท) <input name="price" type="number" min="0" step="0.01" placeholder="0.00" required></label>
               <label>จำนวนคงเหลือ <input name="stock" type="number" min="0" placeholder="0" required></label>
@@ -637,7 +695,7 @@
       <div class="storefront-bar">
         <div class="category-chips" id="categoryChips"></div>
         <div class="storefront-right">
-          <input id="shopSearch" class="storefront-search" placeholder="ค้นหาชื่อหนังสือ ผู้แต่ง หรือหมวดหมู่…" oninput="filterShop()">
+          <input id="shopSearch" class="storefront-search" placeholder="ค้นหาชื่อหนังสือ ISBN ผู้แต่ง หรือหมวดหมู่…" oninput="filterShop()">
         </div>
       </div>
 

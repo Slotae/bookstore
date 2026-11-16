@@ -306,7 +306,6 @@ let shopBooks = [];
 let cart = []; // [{isbn, bookName, price, quantity}]
 let myCustomerID = null;
 let checkoutMethod = 'โอน';
-const NO_PROOF_METHODS = ['เงินสด', 'ปลายทาง']; // วิธีชำระที่ไม่ต้องแนบสลิป/ใบเสร็จ
 let checkoutSlipBase64 = null;
 
 async function loadShop() {
@@ -363,7 +362,8 @@ function filterShop() {
     filtered = filtered.filter(b =>
       b.BookName.toLowerCase().includes(q) ||
       (b.Authors||'').toLowerCase().includes(q) ||
-      (b.Categories||'').toLowerCase().includes(q)
+      (b.Categories||'').toLowerCase().includes(q) ||
+      (b.ISBN||'').toLowerCase().includes(q)
     );
   }
   renderShopCatalog(filtered);

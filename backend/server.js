@@ -69,7 +69,7 @@ const dbConfig = {
   server:   serverName,
   database: process.env.DB_NAME     || "BookstoreDB",
   user:     process.env.DB_USER     || "sa",
-  password: process.env.DB_PASSWORD || "1234",
+  password: process.env.DB_PASSWORD || "",
   options: {
     encrypt:                process.env.DB_ENCRYPT    === "true",
     trustServerCertificate: process.env.DB_TRUST_CERT !== "false",
@@ -100,27 +100,37 @@ function json(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-// readBody: แสดง error ชัดเจนเมื่อ body เกินขนาด แทนการ destroy เงียบๆ
+// readBody: เผื่อ overhead ของ Base64 (ไฟล์รูป 4 MB จะมี payload มากกว่า 5 MB)
+const MAX_BODY_BYTES = 7 * 1024 * 1024;
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";
+    let bytes = 0;
+    let settled = false;
     req.on("data", chunk => {
-      body += chunk;
-      if (body.length > 5_000_000) {
-        req.destroy(new Error("ข้อมูลที่ส่งมามีขนาดใหญ่เกินไป (เกิน 5 MB)"));
+      if (settled) return;
+      bytes += chunk.length;
+      if (bytes > MAX_BODY_BYTES) {
+        settled = true;
+        const err = new Error("ข้อมูลที่ส่งมามีขนาดใหญ่เกินไป (สูงสุดประมาณ 7 MB ต่อคำขอ)");
+        err.statusCode = 413;
+        reject(err);
+        req.resume();
+        return;
       }
+      body += chunk.toString("utf8");
     });
     req.on("end", () => {
+      if (settled) return;
       try { resolve(body ? JSON.parse(body) : {}); }
-      catch (e) { reject(e); }
+      catch (e) { e.statusCode = 400; reject(e); }
     });
-    req.on("error", reject);
+    req.on("error", err => { if (!settled) reject(err); });
   });
 }
 
-async function query(sql_text, inputs = {}) {
-  const pool = await getPool();
-  const req  = pool.request();
+async function query(sql_text, inputs = {}, transaction = null) {
+  const req = transaction ? new sql.Request(transaction) : (await getPool()).request();
   for (const [name, { type, value }] of Object.entries(inputs))
     req.input(name, type, value);
   const result = await req.query(sql_text);
@@ -153,12 +163,40 @@ function isNonNegativeInt(v) {
   return Number.isInteger(n) && n >= 0;
 }
 function isValidISBN(isbn) {
-  const s = String(isbn || "").trim();
-  return /^[0-9Xx-]{10,20}$/.test(s); // 10-13 หลักปกติ, เผื่อมีขีดคั่นตามมาตรฐาน ISBN
+  const s = String(isbn || "").replace(/[\s-]/g, "").toUpperCase();
+  if (/^\d{13}$/.test(s)) {
+    const sum = s.slice(0, 12).split("").reduce((acc, ch, i) => acc + Number(ch) * (i % 2 === 0 ? 1 : 3), 0);
+    return (10 - (sum % 10)) % 10 === Number(s[12]);
+  }
+  if (/^\d{9}[\dX]$/.test(s)) {
+    const sum = s.split("").reduce((acc, ch, i) => acc + (ch === "X" ? 10 : Number(ch)) * (10 - i), 0);
+    return sum % 11 === 0;
+  }
+  return false;
+}
+function isValidSlipDataUrl(value) {
+  if (typeof value !== "string") return false;
+  return /^data:image\/(?:png|jpe?g|webp);base64,[A-Za-z0-9+/=\r\n]+$/i.test(value);
 }
 
-function hashPwd(pwd) {
+function legacyHashPwd(pwd) {
   return crypto.createHash("sha256").update(pwd + "bookstore_salt_2026").digest("hex");
+}
+function hashPwd(pwd) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(String(pwd), salt, 32).toString("hex");
+  return `scrypt$${salt}$${hash}`;
+}
+function verifyPwd(pwd, stored) {
+  const value = String(stored || "");
+  if (value.startsWith("scrypt$")) {
+    const parts = value.split("$");
+    if (parts.length !== 3) return false;
+    const actual = crypto.scryptSync(String(pwd), parts[1], 32);
+    const expected = Buffer.from(parts[2], "hex");
+    return expected.length === actual.length && crypto.timingSafeEqual(actual, expected);
+  }
+  return value === legacyHashPwd(pwd);
 }
 
 // ── AUTO-CANCEL UNPAID ORDERS ────────────────────────────────────────
@@ -181,7 +219,8 @@ async function autoCancelUnpaidOrders() {
       FROM dbo.Orders  o
       JOIN dbo.Payment  p ON p.OrderID = o.OrderID
       JOIN dbo.Shipment s ON s.OrderID = o.OrderID
-      WHERE p.PaymentStatus IN (N'รอชำระ', N'ปฏิเสธ')
+      WHERE p.PaymentMethod IN (N'โอน', N'บัตร')
+        AND p.PaymentStatus IN (N'รอชำระ', N'ปฏิเสธ')
         AND s.Status        = N'รอจัดส่ง'
         AND DATEDIFF(
               day,
@@ -209,8 +248,8 @@ async function autoCancelUnpaidOrders() {
       }
       const pay = await new sql.Request(tx)
         .input("ID", sql.Int, id)
-        .query("SELECT PaymentStatus FROM dbo.Payment WITH (UPDLOCK,ROWLOCK) WHERE OrderID=@ID");
-      if (!pay.recordset.length || !["รอชำระ", "ปฏิเสธ"].includes(pay.recordset[0].PaymentStatus)) {
+        .query("SELECT PaymentStatus,PaymentMethod FROM dbo.Payment WITH (UPDLOCK,ROWLOCK) WHERE OrderID=@ID");
+      if (!pay.recordset.length || !["โอน", "บัตร"].includes(pay.recordset[0].PaymentMethod) || !["รอชำระ", "ปฏิเสธ"].includes(pay.recordset[0].PaymentStatus)) {
         await tx.commit();
         continue;
       }
@@ -270,7 +309,7 @@ async function ensureUsersTable() {
       CREATE TABLE dbo.SystemUser (
         UserID      INT IDENTITY(1,1) NOT NULL,
         Username    NVARCHAR(60)  NOT NULL,
-        PasswordHash VARCHAR(64)  NOT NULL,
+        PasswordHash VARCHAR(160) NOT NULL,
         FullName    NVARCHAR(100) NOT NULL,
         Role        NVARCHAR(30)  NOT NULL DEFAULT 'พนักงานขาย',
         IsActive    BIT           NOT NULL DEFAULT 1,
@@ -287,18 +326,35 @@ async function ensureUsersTable() {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.SystemUser') AND name='CustomerID')
       ALTER TABLE dbo.SystemUser ADD CustomerID INT NULL;
   `);
+  await pool.request().query(`
+    IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.SystemUser') AND name='PasswordHash' AND max_length < 160)
+      ALTER TABLE dbo.SystemUser ALTER COLUMN PasswordHash VARCHAR(160) NOT NULL;
+  `);
 
-  // ถ้ายังไม่มี user เลย (ตารางว่าง) ให้สร้างบัญชีเริ่มต้นให้
+  // ถ้ายังไม่มี user เลย (ตารางว่าง) ให้สร้างบัญชีเริ่มต้น
+  // Production ต้องกำหนดรหัสผ่านผ่าน environment เท่านั้น เพื่อไม่สร้างบัญชีด้วยรหัสผ่านเดาง่าย
   const countRows = await pool.request().query(`SELECT COUNT(*) AS c FROM dbo.SystemUser;`);
   if (countRows.recordset[0].c === 0) {
+    const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+    const bootstrap = {
+      admin: process.env.BOOTSTRAP_ADMIN_PASSWORD || (isProduction ? "" : "admin1234"),
+      staff: process.env.BOOTSTRAP_STAFF_PASSWORD || (isProduction ? "" : "staff1234"),
+      delivery: process.env.BOOTSTRAP_DELIVERY_PASSWORD || (isProduction ? "" : "delivery1234"),
+    };
+    if (!bootstrap.admin || !bootstrap.staff || !bootstrap.delivery) {
+      throw new Error(
+        "SystemUser is empty. Set BOOTSTRAP_ADMIN_PASSWORD, BOOTSTRAP_STAFF_PASSWORD and BOOTSTRAP_DELIVERY_PASSWORD before starting in production."
+      );
+    }
+
     // ใช้ parameterized query แทน string interpolation — ป้องกัน SQL Injection pattern
-    const adminHash    = hashPwd("admin1234");
-    const staffHash    = hashPwd("staff1234");
-    const delivHash    = hashPwd("delivery1234");
+    const adminHash = hashPwd(bootstrap.admin);
+    const staffHash = hashPwd(bootstrap.staff);
+    const delivHash = hashPwd(bootstrap.delivery);
     await pool.request()
-      .input("h1", sql.VarChar(64), adminHash)
-      .input("h2", sql.VarChar(64), staffHash)
-      .input("h3", sql.VarChar(64), delivHash)
+      .input("h1", sql.VarChar(160), adminHash)
+      .input("h2", sql.VarChar(160), staffHash)
+      .input("h3", sql.VarChar(160), delivHash)
       .query(`
         INSERT INTO dbo.SystemUser (Username, PasswordHash, FullName, Role) VALUES
           ('admin',     @h1, N'ผู้ดูแลระบบ',      N'Admin'),
@@ -306,6 +362,9 @@ async function ensureUsersTable() {
           ('delivery1', @h3, N'พนักงานจัดส่ง 1',  N'พนักงานจัดส่ง');
       `);
     console.log("  ➕ สร้างบัญชีผู้ใช้เริ่มต้น: admin / staff1 / delivery1");
+    if (!isProduction && !process.env.BOOTSTRAP_ADMIN_PASSWORD) {
+      console.warn("  ⚠️  Development mode is using demo bootstrap passwords. Change them before deployment.");
+    }
   }
   // เชื่อม CustomerID ของบัญชี "ลูกค้า" เก่าที่ยังไม่ได้ผูก (best-effort จาก FullName)
   await pool.request().query(`
@@ -487,15 +546,20 @@ async function getDashboard() {
       (SELECT COUNT(*) FROM dbo.Customer)              AS customers,
       (SELECT COUNT(*) FROM dbo.Book)                  AS books,
       (SELECT COUNT(*) FROM dbo.Orders)                AS orders,
-      (SELECT ISNULL(SUM(Amount),0) FROM dbo.Payment WHERE PaymentStatus = N'ยืนยันแล้ว') AS revenue,
+      (SELECT ISNULL(SUM(p.Amount),0) FROM dbo.Payment p
+        JOIN dbo.Shipment sh ON sh.OrderID=p.OrderID AND sh.Status<>N'ยกเลิก'
+        WHERE p.PaymentStatus = N'ยืนยันแล้ว') AS revenue,
       (SELECT COUNT(*) FROM dbo.Shipment WHERE Status = N'รอจัดส่ง') AS pendingShip,
       -- Query 17 (MAX/MIN): ช่วงราคาหนังสือทั้งร้าน
       (SELECT MAX(Price) FROM dbo.Book)                AS maxPrice,
       (SELECT MIN(Price) FROM dbo.Book)                AS minPrice,
       -- Query 16 (Subquery + AVG): มูลค่าคำสั่งซื้อเฉลี่ยต่อออเดอร์
       (SELECT AVG(od_total) FROM (
-        SELECT OrderID, SUM(Quantity*UnitPrice) AS od_total
-        FROM dbo.Order_Detail GROUP BY OrderID
+        SELECT od.OrderID, SUM(od.Quantity*od.UnitPrice) AS od_total
+        FROM dbo.Order_Detail od
+        JOIN dbo.Payment p ON p.OrderID=od.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+        JOIN dbo.Shipment sh ON sh.OrderID=od.OrderID AND sh.Status<>N'ยกเลิก'
+        GROUP BY od.OrderID
       ) t)                                              AS avgOrderValue;
   `);
   return {
@@ -514,11 +578,13 @@ async function getCustomers() {
         SELECT 1 FROM dbo.SystemUser u
         WHERE u.CustomerID=c.CustomerID AND u.Role=N'ลูกค้า')
       THEN 1 ELSE 0 END AS HasAccount,
-      COUNT(DISTINCT o.OrderID) AS OrderCount,
+      COUNT(DISTINCT CASE WHEN p.PaymentID IS NOT NULL AND sh.ShipmentID IS NOT NULL THEN o.OrderID END) AS OrderCount,
       ISNULL(SUM(od.Quantity*od.UnitPrice),0) AS TotalSpent
     FROM dbo.Customer c
     LEFT JOIN dbo.Orders o       ON o.CustomerID=c.CustomerID
-    LEFT JOIN dbo.Order_Detail od ON od.OrderID=o.OrderID
+    LEFT JOIN dbo.Payment p      ON p.OrderID=o.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+    LEFT JOIN dbo.Shipment sh    ON sh.OrderID=o.OrderID AND sh.Status<>N'ยกเลิก'
+    LEFT JOIN dbo.Order_Detail od ON od.OrderID=o.OrderID AND p.PaymentID IS NOT NULL AND sh.ShipmentID IS NOT NULL
     GROUP BY c.CustomerID, c.CustomerName, c.Phone, c.Email, c.Address
     ORDER BY c.CustomerID DESC
   `);
@@ -535,9 +601,11 @@ async function getBooks() {
       ISNULL((SELECT STRING_AGG(a.AuthorName,', ')
         FROM dbo.Book_Author ba JOIN dbo.Author a ON a.AuthorID=ba.AuthorID
         WHERE ba.ISBN=b.ISBN),'') AS Authors,
-      ISNULL(SUM(od.Quantity),0) AS TotalSold
+      ISNULL(SUM(CASE WHEN p.PaymentID IS NOT NULL AND sh.ShipmentID IS NOT NULL THEN od.Quantity ELSE 0 END),0) AS TotalSold
     FROM dbo.Book b
     LEFT JOIN dbo.Order_Detail od ON od.ISBN=b.ISBN
+    LEFT JOIN dbo.Payment p ON p.OrderID=od.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+    LEFT JOIN dbo.Shipment sh ON sh.OrderID=od.OrderID AND sh.Status<>N'ยกเลิก'
     GROUP BY b.ISBN, b.BookName, b.Price, b.Stock
     ORDER BY b.BookName;
   `);
@@ -552,70 +620,70 @@ function splitNames(str) {
 }
 
 // หา CategoryID จากชื่อ ถ้ายังไม่มีให้สร้างใหม่ (กันชื่อซ้ำด้วย UQ_Category_CategoryName)
-async function findOrCreateCategoryID(name) {
+async function findOrCreateCategoryID(name, tx = null) {
   const found = await query(
     "SELECT CategoryID FROM dbo.Category WHERE CategoryName=@Name",
-    { Name: { type: sql.NVarChar(80), value: name } });
+    { Name: { type: sql.NVarChar(80), value: name } }, tx);
   if (found.length) return found[0].CategoryID;
   const inserted = await query(
     "INSERT INTO dbo.Category(CategoryName) OUTPUT INSERTED.CategoryID VALUES(@Name)",
-    { Name: { type: sql.NVarChar(80), value: name } });
+    { Name: { type: sql.NVarChar(80), value: name } }, tx);
   return inserted[0].CategoryID;
 }
 
 // หา AuthorID จากชื่อ ถ้ายังไม่มีให้สร้างใหม่ (กันชื่อซ้ำด้วย UQ_Author_AuthorName)
-async function findOrCreateAuthorID(name) {
+async function findOrCreateAuthorID(name, tx = null) {
   const found = await query(
     "SELECT AuthorID FROM dbo.Author WHERE AuthorName=@Name",
-    { Name: { type: sql.NVarChar(120), value: name } });
+    { Name: { type: sql.NVarChar(120), value: name } }, tx);
   if (found.length) return found[0].AuthorID;
   const inserted = await query(
     "INSERT INTO dbo.Author(AuthorName) OUTPUT INSERTED.AuthorID VALUES(@Name)",
-    { Name: { type: sql.NVarChar(120), value: name } });
+    { Name: { type: sql.NVarChar(120), value: name } }, tx);
   return inserted[0].AuthorID;
 }
 
 // ผูกหมวดหมู่ของหนังสือ (ISBN) ตาม string ที่ระบุ (สร้างหมวดหมู่ใหม่อัตโนมัติถ้ายังไม่มี)
 // replace=true: ล้างหมวดหมู่เดิมทั้งหมดก่อนผูกใหม่ (ใช้ตอนแก้ไข "และ" มีการกรอกค่าเข้ามาจริง)
-async function linkBookCategories(isbn, categoriesStr, replace = false) {
+async function linkBookCategories(isbn, categoriesStr, replace = false, tx = null) {
   const categoryNames = splitNames(categoriesStr);
   if (replace) {
-    await query("DELETE FROM dbo.Book_Category WHERE ISBN=@ISBN", { ISBN: { type: sql.VarChar(20), value: isbn } });
+    await query("DELETE FROM dbo.Book_Category WHERE ISBN=@ISBN", { ISBN: { type: sql.VarChar(20), value: isbn } }, tx);
   }
   for (const name of categoryNames) {
-    const categoryId = await findOrCreateCategoryID(name);
+    const categoryId = await findOrCreateCategoryID(name, tx);
     await query(`
       IF NOT EXISTS (SELECT 1 FROM dbo.Book_Category WHERE ISBN=@ISBN AND CategoryID=@CategoryID)
         INSERT INTO dbo.Book_Category(ISBN,CategoryID) VALUES(@ISBN,@CategoryID);`,
       {
         ISBN:       { type: sql.VarChar(20), value: isbn },
         CategoryID: { type: sql.Int,         value: categoryId }
-      });
+      }, tx);
   }
 }
 
 // ผูกผู้แต่งของหนังสือ (ISBN) ตาม string ที่ระบุ (สร้างผู้แต่งใหม่อัตโนมัติถ้ายังไม่มี)
-async function linkBookAuthors(isbn, authorsStr, replace = false) {
+async function linkBookAuthors(isbn, authorsStr, replace = false, tx = null) {
   const authorNames = splitNames(authorsStr);
   if (replace) {
-    await query("DELETE FROM dbo.Book_Author WHERE ISBN=@ISBN", { ISBN: { type: sql.VarChar(20), value: isbn } });
+    await query("DELETE FROM dbo.Book_Author WHERE ISBN=@ISBN", { ISBN: { type: sql.VarChar(20), value: isbn } }, tx);
   }
   for (const name of authorNames) {
-    const authorId = await findOrCreateAuthorID(name);
+    const authorId = await findOrCreateAuthorID(name, tx);
     await query(`
       IF NOT EXISTS (SELECT 1 FROM dbo.Book_Author WHERE ISBN=@ISBN AND AuthorID=@AuthorID)
         INSERT INTO dbo.Book_Author(ISBN,AuthorID) VALUES(@ISBN,@AuthorID);`,
       {
         ISBN:     { type: sql.VarChar(20), value: isbn },
         AuthorID: { type: sql.Int,         value: authorId }
-      });
+      }, tx);
   }
 }
 
 // ใช้ตอนเพิ่มหนังสือใหม่ (ไม่มีของเดิมให้ล้าง จึงแค่เพิ่มตามที่กรอก)
-async function linkBookTaxonomy(isbn, categoriesStr, authorsStr) {
-  await linkBookCategories(isbn, categoriesStr, false);
-  await linkBookAuthors(isbn, authorsStr, false);
+async function linkBookTaxonomy(isbn, categoriesStr, authorsStr, tx = null) {
+  await linkBookCategories(isbn, categoriesStr, false, tx);
+  await linkBookAuthors(isbn, authorsStr, false, tx);
 }
 
 async function getCategoryStats() {
@@ -624,10 +692,12 @@ async function getCategoryStats() {
   return query(`
     SELECT cat.CategoryName,
       COUNT(DISTINCT bc.ISBN) AS BookCount,
-      ISNULL(SUM(od.Quantity*od.UnitPrice),0) AS Revenue
+      ISNULL(SUM(CASE WHEN p.PaymentID IS NOT NULL AND sh.ShipmentID IS NOT NULL THEN od.Quantity*od.UnitPrice ELSE 0 END),0) AS Revenue
     FROM dbo.Book_Category bc
     RIGHT JOIN dbo.Category cat ON cat.CategoryID=bc.CategoryID
     LEFT JOIN dbo.Order_Detail od ON od.ISBN=bc.ISBN
+    LEFT JOIN dbo.Payment p ON p.OrderID=od.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+    LEFT JOIN dbo.Shipment sh ON sh.OrderID=od.OrderID AND sh.Status<>N'ยกเลิก'
     GROUP BY cat.CategoryName
     ORDER BY Revenue DESC;
   `);
@@ -718,7 +788,12 @@ async function ensureDeliveryWorkflow() {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Shipment') AND name='LastLocationAt')
       ALTER TABLE dbo.Shipment ADD LastLocationAt DATETIME2 NULL;
 
-    IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name='FK_Shipment_AssignedDriver' AND parent_object_id=OBJECT_ID('dbo.Shipment'))
+    IF NOT EXISTS (
+      SELECT 1 FROM sys.foreign_keys fk
+      JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+      JOIN sys.columns c ON c.object_id = fkc.parent_object_id AND c.column_id = fkc.parent_column_id
+      WHERE fk.parent_object_id = OBJECT_ID('dbo.Shipment') AND c.name = 'AssignedDriverID'
+    )
       ALTER TABLE dbo.Shipment ADD CONSTRAINT FK_Shipment_AssignedDriver
         FOREIGN KEY (AssignedDriverID) REFERENCES dbo.SystemUser(UserID) ON DELETE SET NULL;
 
@@ -794,9 +869,20 @@ async function ensureSlipColumn() {
 
 // ── CREATE ORDER ───────────────────────────────────────────────────
 async function createOrder(input) {
-  const items = (Array.isArray(input.items) ? input.items : []).filter(i => i.isbn);
-  if (!input.customerId || !items.length)
+  const items = (Array.isArray(input.items) ? input.items : []).filter(i => i && i.isbn);
+  if (!Number.isInteger(Number(input.customerId)) || Number(input.customerId) <= 0 || !items.length)
     throw new Error("กรุณาเลือกลูกค้าและหนังสืออย่างน้อย 1 รายการ");
+  const PAYMENT_METHODS = ["เงินสด", "โอน", "บัตร", "ปลายทาง"];
+  const paymentMethod = String(input.paymentMethod || "โอน");
+  if (!PAYMENT_METHODS.includes(paymentMethod)) throw new Error("วิธีชำระเงินไม่ถูกต้อง");
+  const seenISBN = new Set();
+  for (const item of items) {
+    const isbn = String(item.isbn).trim();
+    const qty = Number(item.quantity);
+    if (!Number.isInteger(qty) || qty <= 0) throw new Error("จำนวนหนังสือต้องเป็นจำนวนเต็มมากกว่า 0");
+    if (seenISBN.has(isbn)) throw new Error(`ISBN ${isbn} ซ้ำในคำสั่งซื้อ กรุณารวมจำนวนไว้ในรายการเดียว`);
+    seenISBN.add(isbn);
+  }
 
   const pool = await getPool();
   const tx   = new sql.Transaction(pool);
@@ -812,8 +898,7 @@ async function createOrder(input) {
 
     for (const item of items) {
       const isbn     = String(item.isbn);
-      const quantity = Number(item.quantity || 0);
-      if (quantity <= 0) throw new Error("จำนวนหนังสือต้องมากกว่า 0");
+      const quantity = Number(item.quantity);
       const rBook = new sql.Request(tx);
       const bRes  = await rBook.input("ISBN", sql.VarChar(20), isbn)
         .query("SELECT ISBN,Price,Stock FROM dbo.Book WITH (UPDLOCK,ROWLOCK) WHERE ISBN=@ISBN;");
@@ -831,18 +916,16 @@ async function createOrder(input) {
       total += Number(book.Price) * quantity;
     }
 
-    const paymentMethod = input.paymentMethod || "โอน";
-    // "บัตร" ตัดเงินจริงทันทีตอน checkout (จำลองอนุมัติบัตรฝั่งหน้าเว็บแล้ว) และไม่มีช่อง
-    // แนบสลิปให้ลูกค้าใช้เลย ถ้ายังตั้งเป็น "รอชำระ" เหมือนช่องทางอื่นจะค้างรอสลิปที่ไม่มีวันมาถึง
-    // จึงบันทึกเป็น "ยืนยันแล้ว" พร้อมวันที่จ่ายทันทีเฉพาะกรณีบัตรเท่านั้น
-    const isCardPaid = paymentMethod === "บัตร";
+    // บัตรในโปรเจกต์เป็นเพียงแบบจำลองหน้าเว็บ จึงห้ามถือว่าชำระสำเร็จจากข้อมูล client โดยอัตโนมัติ
+    // ให้พนักงานตรวจสอบ/ยืนยันอีกครั้งจากหน้า "ชำระเงิน"
+    const initialPaymentStatus = paymentMethod === "บัตร" ? "รอตรวจสอบ" : "รอชำระ";
     const rPay = new sql.Request(tx);
     await rPay
       .input("Amount",        sql.Decimal(10,2),  total)
       .input("PaymentMethod", sql.NVarChar(20),   paymentMethod)
       .input("OrderID",       sql.Int,            order.OrderID)
-      .input("PaymentStatus", sql.NVarChar(20),   isCardPaid ? "ยืนยันแล้ว" : "รอชำระ")
-      .input("PaymentDate",   sql.Date,            isCardPaid ? today() : null)
+      .input("PaymentStatus", sql.NVarChar(20),   initialPaymentStatus)
+      .input("PaymentDate",   sql.Date,            null)
       .query(`INSERT INTO dbo.Payment(PaymentDate,Amount,PaymentMethod,OrderID,PaymentStatus)
               VALUES(@PaymentDate,@Amount,@PaymentMethod,@OrderID,@PaymentStatus);`);
 
@@ -875,9 +958,9 @@ const QUERY_LIBRARY = [
     paramName: "minPrice", paramLabel: "ราคาขั้นต่ำ (บาท)", paramType: "number", paramDefault: 400,
     build: (v) => ({ text: `SELECT ISBN, BookName, Price, Stock FROM dbo.Book WHERE Price > @minPrice ORDER BY Price DESC;`,
       inputs: { minPrice: { type: sql.Decimal(10,2), value: Number(v ?? 400) } } }) },
-  { id: 2, group: "SELECT / WHERE / LIKE", title: "ค้นหาหนังสือจากคำในชื่อเรื่อง", tags: ["SELECT","WHERE","LIKE"], usedIn: "หน้าคลังหนังสือ — ช่องค้นหาชื่อหนังสือ (เรียกจริงผ่าน runLiveQuery ทุกครั้งที่พิมพ์)",
-    paramName: "keyword", paramLabel: "คำค้นหาในชื่อหนังสือ", paramType: "text", paramDefault: "นิยาย",
-    build: (v) => ({ text: `SELECT ISBN, BookName, Price FROM dbo.Book WHERE BookName LIKE @kw;`,
+  { id: 2, group: "SELECT / WHERE / LIKE", title: "ค้นหาหนังสือจากชื่อเรื่องหรือ ISBN", tags: ["SELECT","WHERE","LIKE"], usedIn: "หน้าคลังหนังสือ — ช่องค้นหาชื่อหนังสือ (เรียกจริงผ่าน runLiveQuery ทุกครั้งที่พิมพ์)",
+    paramName: "keyword", paramLabel: "ชื่อหนังสือหรือ ISBN", paramType: "text", paramDefault: "นิยาย",
+    build: (v) => ({ text: `SELECT ISBN, BookName, Price FROM dbo.Book WHERE BookName LIKE @kw OR ISBN LIKE @kw;`,
       inputs: { kw: { type: sql.NVarChar(210), value: `%${v ?? "นิยาย"}%` } } }) },
   { id: 3, group: "SELECT / WHERE / LIKE", title: "ค้นหาลูกค้าจากเบอร์โทรศัพท์ที่ขึ้นต้นด้วย", tags: ["SELECT","WHERE","LIKE"], usedIn: "หน้าลูกค้า — ช่องค้นหา 'เบอร์ขึ้นต้นด้วย' (เรียกจริงผ่าน runLiveQuery ทุกครั้งที่พิมพ์)",
     paramName: "prefix", paramLabel: "ขึ้นต้นด้วย (เบอร์โทร)", paramType: "text", paramDefault: "08",
@@ -890,17 +973,23 @@ const QUERY_LIBRARY = [
   { id: 6, group: "GROUP BY / HAVING", title: "ยอดขายรวม (จำนวนเล่ม) แยกตามหนังสือ", tags: ["GROUP BY"], usedIn: "หน้าคลังหนังสือ — ยอดขายสะสมต่อเล่ม (ต่อยอดใน Query 11)",
     build: () => ({ text: `SELECT b.BookName, SUM(od.Quantity) AS TotalQty
       FROM dbo.Order_Detail od JOIN dbo.Book b ON b.ISBN = od.ISBN
+      JOIN dbo.Payment p ON p.OrderID=od.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+      JOIN dbo.Shipment sh ON sh.OrderID=od.OrderID AND sh.Status<>N'ยกเลิก'
       GROUP BY b.BookName ORDER BY TotalQty DESC;`, inputs: {} }) },
   { id: 7, group: "GROUP BY / HAVING", title: "หนังสือที่มียอดขายรวมมากกว่าที่กำหนด", tags: ["GROUP BY","HAVING"], usedIn: "หน้าคลังหนังสือ — checkbox 'เฉพาะขายดี' (เรียกจริงผ่าน runLiveQuery ทุกครั้งที่ติ๊ก)",
     paramName: "minQty", paramLabel: "ยอดขายรวมมากกว่า (เล่ม)", paramType: "number", paramDefault: 5,
     build: (v) => ({ text: `SELECT b.BookName, SUM(od.Quantity) AS TotalQty
       FROM dbo.Order_Detail od JOIN dbo.Book b ON b.ISBN = od.ISBN
+      JOIN dbo.Payment p ON p.OrderID=od.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+      JOIN dbo.Shipment sh ON sh.OrderID=od.OrderID AND sh.Status<>N'ยกเลิก'
       GROUP BY b.BookName HAVING SUM(od.Quantity) > @minQty ORDER BY TotalQty DESC;`,
       inputs: { minQty: { type: sql.Int, value: Number(v ?? 5) } } }) },
   { id: 8, group: "GROUP BY / HAVING", title: "ลูกค้าที่มีจำนวนคำสั่งซื้อมากกว่าที่กำหนด", tags: ["GROUP BY","HAVING"], usedIn: "หน้าลูกค้า — checkbox 'เฉพาะลูกค้าประจำ' (เรียกจริงผ่าน runLiveQuery ทุกครั้งที่ติ๊ก)",
     paramName: "minOrders", paramLabel: "จำนวนคำสั่งซื้อมากกว่า (ครั้ง)", paramType: "number", paramDefault: 1,
     build: (v) => ({ text: `SELECT c.CustomerName, COUNT(o.OrderID) AS OrderCount
       FROM dbo.Orders o JOIN dbo.Customer c ON c.CustomerID = o.CustomerID
+      JOIN dbo.Payment p ON p.OrderID=o.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+      JOIN dbo.Shipment sh ON sh.OrderID=o.OrderID AND sh.Status<>N'ยกเลิก'
       GROUP BY c.CustomerName HAVING COUNT(o.OrderID) > @minOrders ORDER BY OrderCount DESC;`,
       inputs: { minOrders: { type: sql.Int, value: Number(v ?? 1) } } }) },
   { id: 9, group: "INNER JOIN", title: "รายการคำสั่งซื้อพร้อมชื่อลูกค้า", tags: ["INNER JOIN"], usedIn: "หน้าคำสั่งซื้อ — รายการคำสั่งซื้อทั้งหมด (ฐานของรายการที่แสดง)",
@@ -915,12 +1004,16 @@ const QUERY_LIBRARY = [
       INNER JOIN dbo.Book b ON b.ISBN = od.ISBN
       ORDER BY o.OrderID;`, inputs: {} }) },
   { id: 11, group: "LEFT JOIN", title: "หนังสือทุกเล่มพร้อมยอดขายรวม (รวมเล่มที่ยังไม่เคยขาย)", tags: ["LEFT JOIN"], usedIn: "หน้าคลังหนังสือ — ยอดขายสะสม + ป้าย 'ยังไม่เคยขาย'",
-    build: () => ({ text: `SELECT b.BookName, ISNULL(SUM(od.Quantity), 0) AS TotalSold
+    build: () => ({ text: `SELECT b.BookName, ISNULL(SUM(CASE WHEN p.PaymentID IS NOT NULL AND sh.ShipmentID IS NOT NULL THEN od.Quantity ELSE 0 END), 0) AS TotalSold
       FROM dbo.Book b LEFT JOIN dbo.Order_Detail od ON od.ISBN = b.ISBN
+      LEFT JOIN dbo.Payment p ON p.OrderID=od.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+      LEFT JOIN dbo.Shipment sh ON sh.OrderID=od.OrderID AND sh.Status<>N'ยกเลิก'
       GROUP BY b.BookName ORDER BY TotalSold DESC;`, inputs: {} }) },
   { id: 12, group: "LEFT JOIN", title: "ลูกค้าทุกคนพร้อมจำนวนคำสั่งซื้อ (รวมลูกค้าที่ยังไม่เคยสั่งซื้อ)", tags: ["LEFT JOIN"], usedIn: "หน้าลูกค้า — จำนวนคำสั่งซื้อต่อคน + ป้าย 'ยังไม่เคยสั่งซื้อ'",
-    build: () => ({ text: `SELECT c.CustomerName, COUNT(o.OrderID) AS OrderCount
+    build: () => ({ text: `SELECT c.CustomerName, COUNT(CASE WHEN p.PaymentID IS NOT NULL AND sh.ShipmentID IS NOT NULL THEN o.OrderID END) AS OrderCount
       FROM dbo.Customer c LEFT JOIN dbo.Orders o ON o.CustomerID = c.CustomerID
+      LEFT JOIN dbo.Payment p ON p.OrderID=o.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+      LEFT JOIN dbo.Shipment sh ON sh.OrderID=o.OrderID AND sh.Status<>N'ยกเลิก'
       GROUP BY c.CustomerName ORDER BY OrderCount DESC;`, inputs: {} }) },
   { id: 13, group: "RIGHT JOIN", title: "หมวดหมู่ทั้งหมดพร้อมจำนวนหนังสือในหมวด", tags: ["RIGHT JOIN"], usedIn: "แดชบอร์ดธุรกิจ — กราฟจำนวนหนังสือต่อหมวดหมู่",
     build: () => ({ text: `SELECT cat.CategoryName, COUNT(bc.ISBN) AS BookCount
@@ -931,10 +1024,16 @@ const QUERY_LIBRARY = [
       FROM dbo.Payment p RIGHT JOIN dbo.Orders o ON o.OrderID = p.OrderID
       ORDER BY o.OrderID;`, inputs: {} }) },
   { id: 15, group: "Aggregate Function", title: "ยอดขายรวมทั้งหมด (เฉพาะรายการที่ยืนยันชำระเงินแล้ว)", tags: ["SUM"], usedIn: "แดชบอร์ด + แดชบอร์ดธุรกิจ — การ์ด 'ยอดขายรวม (ยืนยันแล้ว)'",
-    build: () => ({ text: `SELECT SUM(Amount) AS TotalRevenue FROM dbo.Payment WHERE PaymentStatus = N'ยืนยันแล้ว';`, inputs: {} }) },
+    build: () => ({ text: `SELECT SUM(p.Amount) AS TotalRevenue FROM dbo.Payment p
+      JOIN dbo.Shipment sh ON sh.OrderID=p.OrderID AND sh.Status<>N'ยกเลิก'
+      WHERE p.PaymentStatus = N'ยืนยันแล้ว';`, inputs: {} }) },
   { id: 16, group: "Aggregate Function", title: "มูลค่าคำสั่งซื้อเฉลี่ยต่อออเดอร์", tags: ["AVG","Subquery"], usedIn: "แดชบอร์ดธุรกิจ — การ์ด 'มูลค่าเฉลี่ยต่อออเดอร์'",
     build: () => ({ text: `SELECT AVG(od_total) AS AvgOrderValue FROM (
-      SELECT OrderID, SUM(Quantity * UnitPrice) AS od_total FROM dbo.Order_Detail GROUP BY OrderID
+      SELECT od.OrderID, SUM(od.Quantity * od.UnitPrice) AS od_total
+      FROM dbo.Order_Detail od
+      JOIN dbo.Payment p ON p.OrderID=od.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+      JOIN dbo.Shipment sh ON sh.OrderID=od.OrderID AND sh.Status<>N'ยกเลิก'
+      GROUP BY od.OrderID
       ) t;`, inputs: {} }) },
   { id: 17, group: "Aggregate Function", title: "ราคาหนังสือสูงสุดและต่ำสุด", tags: ["MAX","MIN"], usedIn: "แดชบอร์ดธุรกิจ + หน้าคลังหนังสือ — การ์ด 'ช่วงราคาหนังสือ'",
     build: () => ({ text: `SELECT MAX(Price) AS MaxPrice, MIN(Price) AS MinPrice FROM dbo.Book;`, inputs: {} }) },
@@ -945,27 +1044,39 @@ const QUERY_LIBRARY = [
       FROM dbo.Customer c
       JOIN dbo.Orders o ON o.CustomerID = c.CustomerID
       JOIN dbo.Order_Detail od ON od.OrderID = o.OrderID
+      JOIN dbo.Payment p ON p.OrderID=o.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+      JOIN dbo.Shipment sh ON sh.OrderID=o.OrderID AND sh.Status<>N'ยกเลิก'
       GROUP BY c.CustomerName
       HAVING SUM(od.Quantity * od.UnitPrice) > (
         SELECT AVG(t.TotalSpent) FROM (
           SELECT o2.CustomerID, SUM(od2.Quantity * od2.UnitPrice) AS TotalSpent
           FROM dbo.Orders o2 JOIN dbo.Order_Detail od2 ON od2.OrderID = o2.OrderID
+          JOIN dbo.Payment p2 ON p2.OrderID=o2.OrderID AND p2.PaymentStatus=N'ยืนยันแล้ว'
+          JOIN dbo.Shipment sh2 ON sh2.OrderID=o2.OrderID AND sh2.Status<>N'ยกเลิก'
           GROUP BY o2.CustomerID
         ) t
       )
       ORDER BY TotalSpent DESC;`, inputs: {} }) },
   { id: 20, group: "Subquery", title: "หนังสือที่ยังไม่เคยถูกสั่งซื้อเลย", tags: ["Subquery","NOT IN"], usedIn: "แดชบอร์ดธุรกิจ — วิดเจ็ต 'สินค้าที่ควรทำโปรโมชัน'",
-    build: () => ({ text: `SELECT BookName, Stock FROM dbo.Book
-      WHERE ISBN NOT IN (SELECT DISTINCT ISBN FROM dbo.Order_Detail);`, inputs: {} }) },
+    build: () => ({ text: `SELECT b.BookName, b.Stock FROM dbo.Book b
+      WHERE NOT EXISTS (SELECT 1 FROM dbo.Order_Detail od
+        JOIN dbo.Payment p ON p.OrderID=od.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+        JOIN dbo.Shipment sh ON sh.OrderID=od.OrderID AND sh.Status<>N'ยกเลิก'
+        WHERE od.ISBN=b.ISBN);`, inputs: {} }) },
   { id: 21, group: "Subquery", title: "ลูกค้าที่มีจำนวนคำสั่งซื้อสูงสุด 5 อันดับแรก", tags: ["Correlated Subquery"], usedIn: "แดชบอร์ดธุรกิจ — วิดเจ็ต 'ลูกค้าขาประจำ Top 5' (นับความถี่)",
     build: () => ({ text: `SELECT TOP 5 c.CustomerName,
-      (SELECT COUNT(*) FROM dbo.Orders o WHERE o.CustomerID = c.CustomerID) AS OrderCount
+      (SELECT COUNT(*) FROM dbo.Orders o
+       JOIN dbo.Payment p ON p.OrderID=o.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+       JOIN dbo.Shipment sh ON sh.OrderID=o.OrderID AND sh.Status<>N'ยกเลิก'
+       WHERE o.CustomerID = c.CustomerID) AS OrderCount
       FROM dbo.Customer c ORDER BY OrderCount DESC;`, inputs: {} }) },
   { id: 22, group: "GROUP BY / JOIN หลายตาราง", title: "ยอดขายรวมแยกตามหมวดหมู่หนังสือ", tags: ["GROUP BY","JOIN"], usedIn: "แดชบอร์ดธุรกิจ — กราฟยอดขายแยกตามหมวดหมู่",
     build: () => ({ text: `SELECT cat.CategoryName, SUM(od.Quantity * od.UnitPrice) AS Revenue
       FROM dbo.Order_Detail od
       JOIN dbo.Book_Category bc ON bc.ISBN = od.ISBN
       JOIN dbo.Category cat ON cat.CategoryID = bc.CategoryID
+      JOIN dbo.Payment p ON p.OrderID=od.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+      JOIN dbo.Shipment sh ON sh.OrderID=od.OrderID AND sh.Status<>N'ยกเลิก'
       GROUP BY cat.CategoryName ORDER BY Revenue DESC;`, inputs: {} }) }
 ];
 
@@ -981,11 +1092,13 @@ async function runLibraryQuery(id, paramValue) {
 async function reportCustomer() {
   return query(`
     SELECT c.CustomerID, c.CustomerName, c.Phone, c.Email,
-      COUNT(DISTINCT o.OrderID) AS OrderCount,
+      COUNT(DISTINCT CASE WHEN p.PaymentID IS NOT NULL AND sh.ShipmentID IS NOT NULL THEN o.OrderID END) AS OrderCount,
       ISNULL(SUM(od.Quantity * od.UnitPrice), 0) AS TotalSpent
     FROM dbo.Customer c
     LEFT JOIN dbo.Orders o ON o.CustomerID = c.CustomerID
-    LEFT JOIN dbo.Order_Detail od ON od.OrderID = o.OrderID
+    LEFT JOIN dbo.Payment p ON p.OrderID=o.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+    LEFT JOIN dbo.Shipment sh ON sh.OrderID=o.OrderID AND sh.Status<>N'ยกเลิก'
+    LEFT JOIN dbo.Order_Detail od ON od.OrderID = o.OrderID AND p.PaymentID IS NOT NULL AND sh.ShipmentID IS NOT NULL
     GROUP BY c.CustomerID, c.CustomerName, c.Phone, c.Email
     ORDER BY TotalSpent DESC;
   `);
@@ -996,9 +1109,11 @@ async function reportBook() {
       ISNULL((SELECT STRING_AGG(cat.CategoryName, N', ')
         FROM dbo.Book_Category bc JOIN dbo.Category cat ON cat.CategoryID = bc.CategoryID
         WHERE bc.ISBN = b.ISBN), '') AS Categories,
-      ISNULL(SUM(od.Quantity), 0) AS TotalSold
+      ISNULL(SUM(CASE WHEN p.PaymentID IS NOT NULL AND sh.ShipmentID IS NOT NULL THEN od.Quantity ELSE 0 END), 0) AS TotalSold
     FROM dbo.Book b
     LEFT JOIN dbo.Order_Detail od ON od.ISBN = b.ISBN
+    LEFT JOIN dbo.Payment p ON p.OrderID=od.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+    LEFT JOIN dbo.Shipment sh ON sh.OrderID=od.OrderID AND sh.Status<>N'ยกเลิก'
     GROUP BY b.ISBN, b.BookName, b.Price, b.Stock
     ORDER BY b.BookName;
   `);
@@ -1010,6 +1125,8 @@ async function reportSales() {
       SUM(od.Quantity * od.UnitPrice) AS Revenue
     FROM dbo.Orders o
     JOIN dbo.Order_Detail od ON od.OrderID = o.OrderID
+    JOIN dbo.Payment p ON p.OrderID=o.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+    JOIN dbo.Shipment sh ON sh.OrderID=o.OrderID AND sh.Status<>N'ยกเลิก'
     GROUP BY FORMAT(o.OrderDate, 'yyyy-MM')
     ORDER BY SaleMonth;
   `);
@@ -1019,7 +1136,10 @@ async function reportBestSeller() {
     SELECT TOP 5 b.BookName,
       SUM(od.Quantity) AS TotalQty,
       SUM(od.Quantity * od.UnitPrice) AS Revenue
-    FROM dbo.Order_Detail od JOIN dbo.Book b ON b.ISBN = od.ISBN
+    FROM dbo.Order_Detail od
+    JOIN dbo.Book b ON b.ISBN = od.ISBN
+    JOIN dbo.Payment p ON p.OrderID=od.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+    JOIN dbo.Shipment sh ON sh.OrderID=od.OrderID AND sh.Status<>N'ยกเลิก'
     GROUP BY b.BookName ORDER BY TotalQty DESC;
   `);
 }
@@ -1031,23 +1151,31 @@ async function reportTopCustomer() {
     FROM dbo.Customer c
     JOIN dbo.Orders o ON o.CustomerID = c.CustomerID
     JOIN dbo.Order_Detail od ON od.OrderID = o.OrderID
+    JOIN dbo.Payment p ON p.OrderID=o.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+    JOIN dbo.Shipment sh ON sh.OrderID=o.OrderID AND sh.Status<>N'ยกเลิก'
     GROUP BY c.CustomerName ORDER BY TotalSpent DESC;
   `);
 }
 async function reportFrequentCustomers() {
-  // Query 21 (Correlated Subquery): ลูกค้าที่มีจำนวนคำสั่งซื้อสูงสุด 5 อันดับแรก (นับความถี่ ไม่ใช่ยอดใช้จ่าย)
   return query(`
     SELECT TOP 5 c.CustomerName,
-      (SELECT COUNT(*) FROM dbo.Orders o WHERE o.CustomerID = c.CustomerID) AS OrderCount
+      (SELECT COUNT(*) FROM dbo.Orders o
+       JOIN dbo.Payment p ON p.OrderID=o.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+       JOIN dbo.Shipment sh ON sh.OrderID=o.OrderID AND sh.Status<>N'ยกเลิก'
+       WHERE o.CustomerID = c.CustomerID) AS OrderCount
     FROM dbo.Customer c
     ORDER BY OrderCount DESC;
   `);
 }
 async function reportNeverSold() {
-  // Query 20 (Subquery + NOT IN): หนังสือที่ยังไม่เคยถูกสั่งซื้อเลย — ใช้เป็นวิดเจ็ต "สินค้าที่ควรทำโปรโมชัน"
   return query(`
-    SELECT BookName, Stock FROM dbo.Book
-    WHERE ISBN NOT IN (SELECT DISTINCT ISBN FROM dbo.Order_Detail);
+    SELECT b.BookName, b.Stock FROM dbo.Book b
+    WHERE NOT EXISTS (
+      SELECT 1 FROM dbo.Order_Detail od
+      JOIN dbo.Payment p ON p.OrderID=od.OrderID AND p.PaymentStatus=N'ยืนยันแล้ว'
+      JOIN dbo.Shipment sh ON sh.OrderID=od.OrderID AND sh.Status<>N'ยกเลิก'
+      WHERE od.ISBN=b.ISBN
+    );
   `);
 }
 
@@ -1070,9 +1198,15 @@ async function handleApi(req, res, url) {
         { u: { type: sql.NVarChar(60), value: body.username } }
       );
       const user = rows[0];
-      if (!user || user.PasswordHash !== hashPwd(body.password)) {
+      if (!user || !verifyPwd(body.password, user.PasswordHash)) {
         recordLoginFailure(body.username);
         return json(res, 401, { error: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" });
+      }
+      if (!String(user.PasswordHash).startsWith("scrypt$")) {
+        await query("UPDATE dbo.SystemUser SET PasswordHash=@h WHERE UserID=@ID", {
+          h: { type: sql.VarChar(160), value: hashPwd(body.password) },
+          ID: { type: sql.Int, value: user.UserID }
+        });
       }
       recordLoginSuccess(body.username);
       const token = createSession(user);
@@ -1107,6 +1241,16 @@ async function handleApi(req, res, url) {
       const tx   = new sql.Transaction(pool);
       await tx.begin();
       try {
+        // เช็คอีเมลซ้ำล่วงหน้าก่อน insert (เหมือนที่เช็ค Username ซ้ำด้านล่าง)
+        // เพื่อโยน error ข้อความที่อ่านง่าย แทนที่จะปล่อยให้ unique index ของ DB
+        // ชนแล้วตกไปอยู่ใน error handler รวมท้ายไฟล์ (จะขึ้นว่า "เชื่อมต่อฐานข้อมูลไม่สำเร็จ" ซึ่งเข้าใจผิดได้)
+        if (email) {
+          const r0 = new sql.Request(tx);
+          const chkEmail = await r0.input("E0", sql.VarChar(120), email)
+            .query("SELECT 1 AS x FROM dbo.Customer WHERE Email=@E0");
+          if (chkEmail.recordset.length > 0) throw new Error("อีเมลนี้ถูกใช้งานแล้ว กรุณาใช้อีเมลอื่น");
+        }
+
         const r1 = new sql.Request(tx);
         const custRows = await r1
           .input("CustomerName", sql.NVarChar(100), customerName)
@@ -1124,7 +1268,7 @@ async function handleApi(req, res, url) {
         const r3 = new sql.Request(tx);
         const userRows = await r3
           .input("Username",     sql.NVarChar(60),  username)
-          .input("PasswordHash", sql.VarChar(64),   hashPwd(password))
+          .input("PasswordHash", sql.VarChar(160),  hashPwd(password))
           .input("FullName",     sql.NVarChar(100), customerName)
           .input("Role",         sql.NVarChar(30),  "ลูกค้า")
           .input("CustomerID",   sql.Int,           customer.CustomerID)
@@ -1295,7 +1439,7 @@ async function handleApi(req, res, url) {
           c.CustomerName, c.Phone, c.Email,
           p.PaymentID, CONVERT(varchar(19),p.PaymentDate,120) AS PaymentDate,
           p.PaymentMethod, p.PaymentStatus, p.Amount,
-          s.Address AS ShipAddress
+          s.Address AS ShipAddress, s.Status AS ShipmentStatus
         FROM dbo.Orders o
         JOIN dbo.Customer c ON c.CustomerID=o.CustomerID
         LEFT JOIN dbo.Payment p ON p.OrderID=o.OrderID
@@ -1311,6 +1455,8 @@ async function handleApi(req, res, url) {
 
       if (order.PaymentStatus !== "ยืนยันแล้ว")
         throw new Error("ออกใบเสร็จได้เฉพาะรายการที่ยืนยันการชำระเงินแล้วเท่านั้น");
+      if (order.ShipmentStatus === "ยกเลิก")
+        throw new Error("คำสั่งซื้อนี้ถูกยกเลิกแล้ว ไม่สามารถออกใบเสร็จรับเงินได้");
 
       const items = await query(`
         SELECT b.BookName, od.ISBN, od.Quantity, od.UnitPrice,
@@ -1388,18 +1534,22 @@ async function handleApi(req, res, url) {
         throw new Error("ราคาต้องเป็นตัวเลขและไม่ติดลบ");
       if (body.stock != null && !isNonNegativeInt(body.stock))
         throw new Error("จำนวนคงเหลือต้องเป็นจำนวนเต็มและไม่ติดลบ");
-      const rows = await query(`
-        INSERT INTO dbo.Book(ISBN,BookName,Price,Stock) OUTPUT INSERTED.*
-        VALUES(@ISBN,@BookName,@Price,@Stock);`,
-        {
-          ISBN:     { type: sql.VarChar(20),   value: body.isbn              },
-          BookName: { type: sql.NVarChar(200), value: body.bookName          },
-          Price:    { type: sql.Decimal(10,2), value: Number(body.price)     },
-          Stock:    { type: sql.Int,           value: Number(body.stock||0)  }
-        });
-      // ผูกหมวดหมู่ / ผู้แต่ง ที่กรอกมา (คั่นด้วยจุลภาค) เข้ากับหนังสือเล่มนี้
-      await linkBookTaxonomy(body.isbn, body.categories, body.authors);
-      return json(res, 201, rows[0]);
+      const pool = await getPool();
+      const tx = new sql.Transaction(pool); await tx.begin();
+      try {
+        const rows = await query(`
+          INSERT INTO dbo.Book(ISBN,BookName,Price,Stock) OUTPUT INSERTED.*
+          VALUES(@ISBN,@BookName,@Price,@Stock);`,
+          {
+            ISBN:     { type: sql.VarChar(20),   value: body.isbn              },
+            BookName: { type: sql.NVarChar(200), value: body.bookName          },
+            Price:    { type: sql.Decimal(10,2), value: Number(body.price)     },
+            Stock:    { type: sql.Int,           value: Number(body.stock||0)  }
+          }, tx);
+        await linkBookTaxonomy(body.isbn, body.categories, body.authors, tx);
+        await tx.commit();
+        return json(res, 201, rows[0]);
+      } catch(err) { try{ await tx.rollback(); }catch{} throw err; }
     }
 
     // PUT BOOK (update stock/price) (Admin + พนักงานขาย)
@@ -1412,20 +1562,23 @@ async function handleApi(req, res, url) {
         throw new Error("ราคาต้องเป็นตัวเลขและไม่ติดลบ");
       if (body.stock != null && !isNonNegativeInt(body.stock))
         throw new Error("จำนวนคงเหลือต้องเป็นจำนวนเต็มและไม่ติดลบ");
-      await query(`UPDATE dbo.Book SET BookName=@BookName,Price=@Price,Stock=@Stock WHERE ISBN=@ISBN;`,
-        {
-          ISBN:     { type: sql.VarChar(20),   value: isbn                  },
-          BookName: { type: sql.NVarChar(200), value: body.bookName         },
-          Price:    { type: sql.Decimal(10,2), value: Number(body.price)    },
-          Stock:    { type: sql.Int,           value: Number(body.stock||0) }
-        });
-      // หมวดหมู่/ผู้แต่ง: แก้ไข "เฉพาะ" ช่องที่มีการกรอกค่าเข้ามาจริง (ไม่ว่างเปล่า)
-      // ถ้าเว้นช่องไว้ = ไม่แตะต้องความเชื่อมโยงเดิม กันเผลอลบหมวดหมู่/ผู้แต่งเดิมทิ้งโดยไม่ตั้งใจ
-      if (body.categories != null && body.categories.trim() !== "")
-        await linkBookCategories(isbn, body.categories, true);
-      if (body.authors != null && body.authors.trim() !== "")
-        await linkBookAuthors(isbn, body.authors, true);
-      return json(res, 200, { ok: true });
+      const pool = await getPool();
+      const tx = new sql.Transaction(pool); await tx.begin();
+      try {
+        await query(`UPDATE dbo.Book SET BookName=@BookName,Price=@Price,Stock=@Stock WHERE ISBN=@ISBN;`,
+          {
+            ISBN:     { type: sql.VarChar(20),   value: isbn                  },
+            BookName: { type: sql.NVarChar(200), value: body.bookName         },
+            Price:    { type: sql.Decimal(10,2), value: Number(body.price)    },
+            Stock:    { type: sql.Int,           value: Number(body.stock||0) }
+          }, tx);
+        if (body.categories != null && body.categories.trim() !== "")
+          await linkBookCategories(isbn, body.categories, true, tx);
+        if (body.authors != null && body.authors.trim() !== "")
+          await linkBookAuthors(isbn, body.authors, true, tx);
+        await tx.commit();
+        return json(res, 200, { ok: true });
+      } catch(err) { try{ await tx.rollback(); }catch{} throw err; }
     }
 
     // POST ORDER (Admin, พนักงานขาย สั่งซื้อแทนลูกค้าได้ทุกคน / ลูกค้า สั่งซื้อได้เฉพาะของตัวเอง)
@@ -1436,6 +1589,8 @@ async function handleApi(req, res, url) {
         // ป้องกันลูกค้าคนหนึ่งยิง API ตรงๆ เพื่อสั่งซื้อในนามลูกค้าคนอื่น
         if (!sess.customerID) throw new Error("ไม่พบข้อมูลลูกค้าของบัญชีนี้");
         body.customerId = sess.customerID;
+        delete body.orderDate;
+        delete body.shipDate;
       }
       return json(res, 201, await createOrder(body));
     }
@@ -1459,9 +1614,14 @@ async function handleApi(req, res, url) {
       const pool=await getPool(),tx=new sql.Transaction(pool); await tx.begin();
       try{
         const cur=(await new sql.Request(tx).input("ID",sql.Int,id)
-          .query(`SELECT ShipmentID,Status,AssignedDriverID FROM dbo.Shipment WITH (UPDLOCK,ROWLOCK) WHERE ShipmentID=@ID`)).recordset[0];
+          .query(`SELECT s.ShipmentID,s.Status,s.AssignedDriverID,p.PaymentMethod,p.PaymentStatus
+                  FROM dbo.Shipment s WITH (UPDLOCK,ROWLOCK)
+                  JOIN dbo.Payment p WITH (UPDLOCK,ROWLOCK) ON p.OrderID=s.OrderID
+                  WHERE s.ShipmentID=@ID`)).recordset[0];
         if(!cur) throw new Error("ไม่พบรายการจัดส่ง");
         if(cur.Status!=="รอจัดส่ง") throw new Error(cur.Status==="กำลังจัดส่ง"?"งานนี้มีพนักงานรับไปแล้ว":"งานนี้ไม่อยู่ในคิวที่รับได้");
+        if(cur.PaymentMethod!=="ปลายทาง" && cur.PaymentStatus!=="ยืนยันแล้ว")
+          throw new Error("ยังไม่สามารถรับงานได้: คำสั่งซื้อนี้ยังไม่ได้ยืนยันการชำระเงิน");
         if(cur.AssignedDriverID) throw new Error("งานนี้ถูกพนักงานคนอื่นรับไปแล้ว");
         await new sql.Request(tx).input("ID",sql.Int,id).input("DriverID",sql.Int,sess.userID)
           .query(`UPDATE dbo.Shipment SET AssignedDriverID=@DriverID,Status=N'กำลังจัดส่ง',
@@ -1494,14 +1654,23 @@ async function handleApi(req, res, url) {
       const pool=await getPool(),tx=new sql.Transaction(pool); await tx.begin();
       try{
         const cur=(await new sql.Request(tx).input("ID",sql.Int,id)
-          .query(`SELECT ShipmentID,Status,AssignedDriverID FROM dbo.Shipment WITH (UPDLOCK,ROWLOCK) WHERE ShipmentID=@ID`)).recordset[0];
+          .query(`SELECT s.ShipmentID,s.Status,s.AssignedDriverID,s.OrderID,p.PaymentMethod,p.PaymentStatus
+                  FROM dbo.Shipment s WITH (UPDLOCK,ROWLOCK)
+                  LEFT JOIN dbo.Payment p WITH (UPDLOCK,ROWLOCK) ON p.OrderID=s.OrderID
+                  WHERE s.ShipmentID=@ID`)).recordset[0];
         if(!cur) throw new Error("ไม่พบรายการจัดส่ง");
         if(sess.role==="พนักงานจัดส่ง" && cur.AssignedDriverID!==sess.userID)
           throw new Error("คุณอัปเดตได้เฉพาะงานที่รับไว้เท่านั้น");
         if(sess.role==="พนักงานจัดส่ง" && status==="รอจัดส่ง") throw new Error("ไม่สามารถย้อนกลับเป็นรอจัดส่งได้");
         const same=status===cur.Status;
-        const forward=(cur.Status==="รอจัดส่ง"&&status==="กำลังจัดส่ง")||(cur.Status==="กำลังจัดส่ง"&&status==="จัดส่งแล้ว");
-        const cancel=(sess.role!=="พนักงานจัดส่ง"&&status==="ยกเลิก"&&cur.Status!=="จัดส่งแล้ว");
+        if(status==="ยกเลิก" && cur.PaymentStatus==="ยืนยันแล้ว")
+          throw new Error("คำสั่งซื้อนี้ยืนยันการชำระเงินแล้ว จึงยกเลิกตรงๆ ไม่ได้ กรุณาดำเนินการคืนเงินก่อน");
+        if(status==="กำลังจัดส่ง" && cur.Status==="รอจัดส่ง")
+          throw new Error("กรุณาให้พนักงานจัดส่งกดรับงานจากคิวก่อน ไม่สามารถข้ามขั้นตอนเป็นกำลังจัดส่งได้");
+        if(status==="จัดส่งแล้ว" && cur.PaymentMethod!=="ปลายทาง" && cur.PaymentStatus!=="ยืนยันแล้ว")
+          throw new Error("ไม่สามารถปิดงานจัดส่งได้ เนื่องจากการชำระเงินยังไม่ได้รับการยืนยัน");
+        const forward=(cur.Status==="กำลังจัดส่ง"&&status==="จัดส่งแล้ว");
+        const cancel=(sess.role!=="พนักงานจัดส่ง"&&status==="ยกเลิก"&&!["จัดส่งแล้ว","ยกเลิก"].includes(cur.Status));
         if(!same&&!forward&&!cancel) throw new Error(`ไม่สามารถเปลี่ยนจาก "${cur.Status}" เป็น "${status}" ได้`);
         const sets=["Status=@Status","TrackingNo=ISNULL(@TrackingNo,TrackingNo)","ShippingCompany=ISNULL(@ShippingCompany,ShippingCompany)"];
         if(status==="กำลังจัดส่ง") sets.push("PickedUpAt=ISNULL(PickedUpAt,SYSDATETIME())");
@@ -1511,6 +1680,24 @@ async function handleApi(req, res, url) {
           .input("TrackingNo",sql.VarChar(50),body.trackingNo||null)
           .input("ShippingCompany",sql.NVarChar(100),body.shippingCompany||null)
           .query(`UPDATE dbo.Shipment SET ${sets.join(",")} WHERE ShipmentID=@ID`);
+        // เก็บเงินปลายทาง: เมื่อพนักงานยืนยันส่งสำเร็จ ถือว่าได้รับเงินจริงแล้ว
+        if(status==="จัดส่งแล้ว" && cur.PaymentMethod==="ปลายทาง" && cur.PaymentStatus!=="ยืนยันแล้ว") {
+          await new sql.Request(tx).input("OID",sql.Int,cur.OrderID)
+            .query(`UPDATE dbo.Payment
+                    SET PaymentStatus=N'ยืนยันแล้ว', PaymentDate=COALESCE(PaymentDate,CONVERT(date,GETDATE())), RejectedAt=NULL
+                    WHERE OrderID=@OID`);
+        }
+        if(cancel){
+          const details=await new sql.Request(tx).input("OID",sql.Int,cur.OrderID)
+            .query("SELECT ISBN,Quantity FROM dbo.Order_Detail WHERE OrderID=@OID");
+          for(const d of details.recordset){
+            await new sql.Request(tx).input("ISBN",sql.VarChar(20),d.ISBN).input("Qty",sql.Int,d.Quantity)
+              .query("UPDATE dbo.Book SET Stock=Stock+@Qty WHERE ISBN=@ISBN");
+          }
+          await new sql.Request(tx).input("OID",sql.Int,cur.OrderID)
+            .query(`UPDATE dbo.Payment SET PaymentStatus=N'รอชำระ',PaymentDate=NULL,SlipImage=NULL,RejectedAt=NULL
+                    WHERE OrderID=@OID AND PaymentStatus<>N'ยืนยันแล้ว'`);
+        }
         if(!same) await addShipmentHistory(id,status,body.note||`เปลี่ยนสถานะเป็น ${status}`,sess.userID,sess.fullName,tx);
         await tx.commit(); return json(res,200,{ok:true});
       }catch(err){try{await tx.rollback();}catch{} throw err;}
@@ -1525,14 +1712,24 @@ async function handleApi(req, res, url) {
       if (!id) throw new Error("PaymentID ไม่ถูกต้อง");
       const allowed = ["ยืนยันแล้ว", "ปฏิเสธ", "รอตรวจสอบ", "รอชำระ"];
       if (!allowed.includes(body.status)) throw new Error("สถานะไม่ถูกต้อง");
-      const pay = await query("SELECT SlipImage, OrderID, PaymentMethod FROM dbo.Payment WHERE PaymentID=@ID",
+      const pay = await query(`SELECT p.SlipImage,p.OrderID,p.PaymentMethod,p.PaymentStatus,s.Status AS ShipmentStatus
+                               FROM dbo.Payment p LEFT JOIN dbo.Shipment s ON s.OrderID=p.OrderID
+                               WHERE p.PaymentID=@ID`,
         { ID: { type: sql.Int, value: id } });
       if (!pay.length) throw new Error("ไม่พบรายการชำระเงิน");
-      // ต้องมีหลักฐานก่อนยืนยันสำหรับ "โอน" และ "บัตร" (มีสลิป/ใบเสร็จ POS ให้แนบได้จริง เก็บไว้กระทบยอด/กันโต้แย้งภายหลัง)
-      // "เงินสด" (ชำระหน้าร้าน) และ "ปลายทาง" (COD) เท่านั้นที่ยกเว้น เพราะนับต่อหน้าเป็นจุดสิ้นสุด ไม่มีอะไรให้ตรวจย้อนหลัง
-      const NO_PROOF_METHODS = ["เงินสด", "ปลายทาง"];
+      // การโอนต้องมีสลิปก่อนยืนยัน ส่วนบัตรในเวอร์ชันนี้เป็น flow จำลองจึงให้พนักงานยืนยันจากหน้า Backoffice
+      // เงินสด/ปลายทาง/บัตรไม่บังคับไฟล์หลักฐานที่ API นี้
+      const NO_PROOF_METHODS = ["เงินสด", "ปลายทาง", "บัตร"];
+      const INSTANT_CANCEL_METHODS = ["เงินสด", "ปลายทาง"];
+      if (pay[0].ShipmentStatus === "ยกเลิก") throw new Error("คำสั่งซื้อนี้ถูกยกเลิกแล้ว ไม่สามารถเปลี่ยนสถานะการชำระเงินได้");
+      if (pay[0].ShipmentStatus === "จัดส่งแล้ว" && body.status !== "ยืนยันแล้ว")
+        throw new Error("คำสั่งซื้อนี้จัดส่งสำเร็จแล้ว ไม่สามารถย้อนสถานะการชำระเงินได้");
+      if (pay[0].ShipmentStatus === "กำลังจัดส่ง" && pay[0].PaymentStatus === "ยืนยันแล้ว" && body.status !== "ยืนยันแล้ว")
+        throw new Error("มีพนักงานรับงานจัดส่งแล้ว ไม่สามารถลดสถานะการชำระเงินที่ยืนยันแล้วได้");
+      if (pay[0].ShipmentStatus === "กำลังจัดส่ง" && pay[0].PaymentMethod !== "ปลายทาง" && body.status !== "ยืนยันแล้ว")
+        throw new Error("มีพนักงานรับงานจัดส่งแล้ว ไม่สามารถลดสถานะการชำระเงินได้");
       if (body.status === "ยืนยันแล้ว" && !NO_PROOF_METHODS.includes(pay[0].PaymentMethod) && !pay[0].SlipImage)
-        throw new Error("ยังไม่มีสลิป/ใบเสร็จแนบมา ไม่สามารถยืนยันการชำระเงินได้");
+        throw new Error("ยังไม่มีสลิปแนบมา ไม่สามารถยืนยันการชำระเงินได้");
 
       const pool2 = await getPool();
       const tx2   = new sql.Transaction(pool2);
@@ -1547,6 +1744,10 @@ async function handleApi(req, res, url) {
           .query(`
             UPDATE dbo.Payment
             SET PaymentStatus = @Status,
+                PaymentDate = CASE
+                  WHEN @Status=N'ยืนยันแล้ว' THEN COALESCE(PaymentDate, CONVERT(date, GETDATE()))
+                  WHEN @Status=N'รอชำระ' THEN NULL
+                  ELSE PaymentDate END,
                 RejectedAt = CASE WHEN @Status = N'ปฏิเสธ' THEN CONVERT(date, GETDATE()) ELSE NULL END
             WHERE PaymentID=@ID;
           `);
@@ -1560,21 +1761,10 @@ async function handleApi(req, res, url) {
             await addShipmentHistory(ready.recordset[0].ShipmentID,"รอจัดส่ง","ยืนยันการชำระเงินแล้ว — รอพนักงานรับงาน",sess.userID,sess.fullName,tx2);
         }
 
-        // ── ถ้าการชำระถูกปฏิเสธก่อนส่ง: คืนงานเข้าคิว พร้อมล้างผู้รับงาน
-        if (body.status === "ปฏิเสธ") {
-          const reset = await new sql.Request(tx2).input("OID",sql.Int,pay[0].OrderID)
-            .query(`SELECT ShipmentID,Status FROM dbo.Shipment WITH (UPDLOCK,ROWLOCK) WHERE OrderID=@OID;`);
-          if(reset.recordset[0] && reset.recordset[0].Status==="กำลังจัดส่ง"){
-            await new sql.Request(tx2).input("OID",sql.Int,pay[0].OrderID)
-              .query(`UPDATE dbo.Shipment SET Status=N'รอจัดส่ง',AssignedDriverID=NULL,AcceptedAt=NULL,PickedUpAt=NULL WHERE OrderID=@OID;`);
-            await addShipmentHistory(reset.recordset[0].ShipmentID,"รอจัดส่ง","การชำระเงินถูกปฏิเสธ — คืนงานเข้าคิว",sess.userID,sess.fullName,tx2);
-          }
-        }
-
-        // ปฏิเสธเงินสด/ปลายทาง (NO_PROOF_METHODS) → ยกเลิกออเดอร์ทันที ไม่ต้องรอ auto-cancel 3 วัน
+        // ปฏิเสธเงินสด/ปลายทาง → ยกเลิกออเดอร์ทันที ไม่ต้องรอ auto-cancel 3 วัน
         //          เพราะฝั่งลูกค้าไม่มีปุ่มแนบสลิปให้แก้ไขอยู่แล้ว (การปฏิเสธเป็นการตัดสินใจฝ่ายเดียวของพนักงาน)
         //          รอ 3 วันไปก็ไม่มีอะไรเปลี่ยน จึงคืนสต็อกและยกเลิกให้เลยเพื่อไม่ให้ order ค้างเก้อ
-        if (body.status === "ปฏิเสธ" && NO_PROOF_METHODS.includes(pay[0].PaymentMethod)) {
+        if (body.status === "ปฏิเสธ" && INSTANT_CANCEL_METHODS.includes(pay[0].PaymentMethod)) {
           const ship = await new sql.Request(tx2)
             .input("OID", sql.Int, pay[0].OrderID)
             .query("SELECT Status FROM dbo.Shipment WITH (UPDLOCK,ROWLOCK) WHERE OrderID=@OID");
@@ -1609,6 +1799,16 @@ async function handleApi(req, res, url) {
       const id = Number(p.split("/").pop());
       if (!id) throw new Error("PaymentID ไม่ถูกต้อง");
       if (!body.slip) throw new Error("กรุณาเลือกไฟล์สลิป");
+      if (!isValidSlipDataUrl(body.slip)) throw new Error("ไฟล์สลิปต้องเป็นรูป PNG, JPG/JPEG หรือ WEBP เท่านั้น");
+
+      const paymentInfo = await query(`SELECT p.PaymentMethod,p.PaymentStatus,s.Status AS ShipmentStatus
+                                       FROM dbo.Payment p LEFT JOIN dbo.Shipment s ON s.OrderID=p.OrderID
+                                       WHERE p.PaymentID=@ID`,
+        { ID: { type: sql.Int, value: id } });
+      if (!paymentInfo.length) throw new Error("ไม่พบรายการชำระเงิน");
+      if (paymentInfo[0].PaymentMethod !== "โอน") throw new Error("แนบสลิปได้เฉพาะรายการชำระด้วยการโอนเงิน");
+      if (["ยกเลิก","จัดส่งแล้ว"].includes(paymentInfo[0].ShipmentStatus))
+        throw new Error("ไม่สามารถแนบสลิปให้คำสั่งซื้อที่ยกเลิกหรือจัดส่งเสร็จแล้วได้");
 
       // ตรวจสิทธิ์: ลูกค้าแนบสลิปได้แค่ของ order ตัวเองเท่านั้น
       if (sess.role === "ลูกค้า") {
@@ -1682,9 +1882,15 @@ async function handleApi(req, res, url) {
         // สถานะ Shipment แทรกกลางระหว่างที่เรากำลังเช็คแล้วอัปเดต (race condition)
         const ship = await new sql.Request(tx)
           .input("ID", sql.Int, id)
-          .query("SELECT Status FROM dbo.Shipment WITH (UPDLOCK,ROWLOCK) WHERE OrderID=@ID");
-        if (ship.recordset.length && ship.recordset[0].Status !== "รอจัดส่ง")
+          .query(`SELECT s.Status,p.PaymentStatus
+                  FROM dbo.Shipment s WITH (UPDLOCK,ROWLOCK)
+                  LEFT JOIN dbo.Payment p WITH (UPDLOCK,ROWLOCK) ON p.OrderID=s.OrderID
+                  WHERE s.OrderID=@ID`);
+        if (!ship.recordset.length) throw new Error("ไม่พบรายการจัดส่งของคำสั่งซื้อนี้");
+        if (ship.recordset[0].Status !== "รอจัดส่ง")
           throw new Error(`ไม่สามารถยกเลิกได้ เนื่องจากสถานะจัดส่งเป็น "${ship.recordset[0].Status}" แล้ว`);
+        if (ship.recordset[0].PaymentStatus === "ยืนยันแล้ว")
+          throw new Error("คำสั่งซื้อนี้ยืนยันการชำระเงินแล้ว จึงยกเลิกตรงๆ ไม่ได้ กรุณาติดต่อพนักงานเพื่อดำเนินการคืนเงิน");
 
         // คืน stock
         const details = await new sql.Request(tx)
@@ -1730,7 +1936,7 @@ async function handleApi(req, res, url) {
         throw new Error("กรุณากรอกข้อมูลให้ครบ");
       if (body.password.length < 6)
         throw new Error("รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร");
-      const ALLOWED_ROLES = ["Admin", "พนักงานขาย", "พนักงานจัดส่ง", "ลูกค้า"];
+      const ALLOWED_ROLES = ["Admin", "พนักงานขาย", "พนักงานจัดส่ง"];
       if (!ALLOWED_ROLES.includes(body.role))
         throw new Error("บทบาทไม่ถูกต้อง");
       const rows = await query(`
@@ -1738,7 +1944,7 @@ async function handleApi(req, res, url) {
         VALUES(@Username,@PasswordHash,@FullName,@Role);`,
         {
           Username:     { type: sql.NVarChar(60),  value: body.username         },
-          PasswordHash: { type: sql.VarChar(64),   value: hashPwd(body.password)},
+          PasswordHash: { type: sql.VarChar(160),  value: hashPwd(body.password)},
           FullName:     { type: sql.NVarChar(100), value: body.fullName         },
           Role:         { type: sql.NVarChar(30),  value: body.role             }
         });
@@ -1758,9 +1964,11 @@ async function handleApi(req, res, url) {
 
       // กันปิดใช้งาน/ลด role ของ Admin ที่ใช้งานอยู่คนสุดท้าย (เผื่อระบบไม่มีใครล็อกอินจัดการต่อได้)
       if (body.isActive !== undefined || body.role) {
-        const target = await query("SELECT UserID, IsActive, Role FROM dbo.SystemUser WHERE UserID=@ID",
+        const target = await query("SELECT UserID, IsActive, Role, CustomerID FROM dbo.SystemUser WHERE UserID=@ID",
           { ID: { type: sql.Int, value: id } });
         if (!target.length) throw new Error("ไม่พบผู้ใช้งานนี้");
+        if (body.role === "ลูกค้า" && !target[0].CustomerID)
+          throw new Error("ไม่สามารถเปลี่ยนบัญชีพนักงานเป็นลูกค้าโดยไม่มี CustomerID กรุณาให้ลูกค้าสมัครสมาชิกผ่านหน้าสมัครสมาชิก");
 
         const willDeactivate = body.isActive === false;
         const willChangeRoleAwayFromAdmin = body.role !== undefined && body.role !== "Admin";
@@ -1785,7 +1993,7 @@ async function handleApi(req, res, url) {
       if (body.password) {
         if (body.password.length < 6) throw new Error("รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร");
         await query(`UPDATE dbo.SystemUser SET PasswordHash=@h WHERE UserID=@ID;`,
-          { ID: { type: sql.Int, value: id }, h: { type: sql.VarChar(64), value: hashPwd(body.password) } });
+          { ID: { type: sql.Int, value: id }, h: { type: sql.VarChar(160), value: hashPwd(body.password) } });
       }
 
       // เพิกถอน session ที่ user คนนี้ใช้งานอยู่ทันที ถ้ามีการเปลี่ยนสถานะ/สิทธิ์/รหัสผ่าน
@@ -1826,12 +2034,22 @@ async function handleApi(req, res, url) {
     // DB/เครือข่ายล้มเหลว (เช่น ต่อ SQL Server ไม่ได้, timeout) — err มาจาก driver 'mssql'
     // ไม่ควรโชว์ err.message ดิบๆ ให้ผู้ใช้เห็น (มักมีรายละเอียดเซิร์ฟเวอร์/พอร์ต/สแตกภายใน
     // ซึ่งเป็นข้อมูลอ่อนไหวและอ่านไม่รู้เรื่องสำหรับผู้ใช้ทั่วไป) ให้ตอบข้อความที่เข้าใจง่ายแทน
-    const DB_ERROR_NAMES = ["ConnectionError", "TransactionError", "RequestError"];
-    if (DB_ERROR_NAMES.includes(err.name) || err.code) {
-      console.error("❌ DB/driver error:", err.name, err.code, err.message);
+    if (err.statusCode) return json(res, err.statusCode, { error: err.message });
+    const transientDbCodes = new Set(["ETIMEOUT","ESOCKET","ECONNCLOSED","ENOTOPEN","ELOGIN"]);
+    if (err.name === "ConnectionError" || transientDbCodes.has(err.code)) {
+      console.error("❌ DB connection error:", err.name, err.code, err.message);
       return json(res, 503, { error: "เชื่อมต่อฐานข้อมูลไม่สำเร็จ กรุณาลองใหม่อีกครั้งในภายหลัง" });
     }
-    // error ที่โยนเองในโค้ด (throw new Error('ข้อความภาษาไทยที่อ่านง่าย')) ปลอดภัยที่จะแสดงตรงๆ
+    if (err.name === "RequestError" || err.name === "TransactionError" || err.code) {
+      console.error("❌ DB request error:", err.name, err.code, err.number, err.message);
+      const duplicate = err.number === 2601 || err.number === 2627;
+      const constraint = duplicate || err.number === 547 || err.number === 515 || err.number === 245 || err.number === 8114;
+      return json(res, duplicate ? 409 : (constraint ? 400 : 500), {
+        error: duplicate ? "ข้อมูลนี้มีอยู่ในระบบแล้ว กรุณาตรวจสอบค่าที่กรอก" :
+               constraint ? "ข้อมูลไม่ผ่านเงื่อนไขของฐานข้อมูล กรุณาตรวจสอบค่าที่กรอก" :
+               "เกิดข้อผิดพลาดขณะประมวลผลฐานข้อมูล"
+      });
+    }
     json(res, 400, { error: err.message });
   }
 }
@@ -1839,13 +2057,20 @@ async function handleApi(req, res, url) {
 // ── STATIC FILE SERVER ─────────────────────────────────────────────
 function serveStatic(req, res, url) {
   const file   = url.pathname === "/" ? "bookstore.html" : decodeURIComponent(url.pathname.slice(1));
-  const target = path.join(ROOT, file);
-  if (!target.startsWith(ROOT) || !fs.existsSync(target) || fs.statSync(target).isDirectory()) {
+  const target = path.resolve(ROOT, file);
+  const rel = path.relative(ROOT, target);
+  if (rel.startsWith("..") || path.isAbsolute(rel) || !fs.existsSync(target) || fs.statSync(target).isDirectory()) {
     res.writeHead(404); res.end("Not found"); return;
   }
   const ext   = path.extname(target).toLowerCase();
   const types = { ".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "text/javascript", ".png":"image/png", ".jpg":"image/jpeg" };
-  res.writeHead(200, { "Content-Type": types[ext] || "application/octet-stream" });
+  // [FIX] ปิดการแคชไฟล์หน้าเว็บ/สคริปต์/สไตล์ทั้งหมดของฝั่ง browser โดยเด็ดขาด
+  // ระหว่างพัฒนา แก้ไฟล์แล้ว refresh บางทีเบราว์เซอร์ยังใช้ของเก่าที่แคชไว้ ทำให้ดูเหมือนบั๊กเดิมไม่หาย
+  res.writeHead(200, {
+    "Content-Type": types[ext] || "application/octet-stream",
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Pragma": "no-cache"
+  });
   fs.createReadStream(target).pipe(res);
 }
 
@@ -1896,7 +2121,7 @@ function serveStatic(req, res, url) {
       console.log(`  URL      : http://localhost:${PORT}`);
       console.log(`  Database : ${dbConfig.server}:${dbConfig.port||"default"}/${dbConfig.database}`);
       console.log(`  User     : ${dbConfig.user}`);
-      console.log("  Accounts : admin/admin1234  staff1/staff1234  delivery1/delivery1234");
+      console.log("  Accounts : ใช้บัญชีเริ่มต้นตาม SQL/ENV และควรเปลี่ยนรหัสผ่านหลังติดตั้ง");
       console.log("═".repeat(58));
 
       // เปิดหน้าเว็บให้อัตโนมัติ (ปิดได้ด้วย NO_OPEN=1 npm start)

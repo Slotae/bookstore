@@ -2,9 +2,11 @@
 // CORE — shared state, API, tabs, loading, and render helpers
 // ================================================================
 const money = new Intl.NumberFormat('th-TH',{style:'currency',currency:'THB'});
-// [FIX] จำกัดขนาดไฟล์สลิปฝั่ง frontend ก่อนอ่าน/ส่งขึ้น server (server จำกัด body รวมไว้ที่ 5MB)
+function bangkokToday(){ return new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Bangkok'}); }
+// [FIX] จำกัดขนาดไฟล์สลิปฝั่ง frontend ก่อนอ่าน/ส่งขึ้น server (server จำกัด body รวมไว้ประมาณ 7MB)
 // อยู่ที่ core.js (โหลดก่อนไฟล์อื่นทั้งหมด) เพื่อให้ทุกจุดที่อัปโหลดสลิป (payments.js, checkout.js) ใช้ค่าเดียวกัน
-const SLIP_MAX_BYTES = 4 * 1024 * 1024; // 4MB (เผื่อ overhead ของ base64 ~33% ให้ไม่เกิน limit 5MB ของ server)
+const SLIP_MAX_BYTES = 4 * 1024 * 1024; // 4MB (เผื่อ overhead ของ base64 ~33% ให้ไม่เกิน limit ของ server)
+const NO_PROOF_METHODS = ['เงินสด', 'ปลายทาง', 'บัตร']; // ช่องทางที่ไม่บังคับไฟล์หลักฐานใน API
 let TOKEN = localStorage.getItem('bms_token') || '';
 let ME    = JSON.parse(localStorage.getItem('bms_me') || 'null');
 const state = {customers:[],books:[],orders:[],payments:[],shipments:[],users:[],dashboard:null,
@@ -16,7 +18,19 @@ function debounce(fn, ms){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout
 // ══ API ═════════════════════════════════════════════════════════════
 async function api(path,opts={}){
   const res=await fetch(path,{headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},...opts});
-  if(res.status===401){doLogout();throw new Error('กรุณาเข้าสู่ระบบใหม่')}
+  if(res.status===401){
+    // [FIX-AUTH-REDIRECT] 401 จาก request เบื้องหลังไม่ควรเรียก doLogout()
+    // เพราะ doLogout() เปลี่ยนหน้าจอทันทีและเคยทำให้ฟอร์มสมัครสมาชิกเด้งหายระหว่างกรอก
+    TOKEN=''; ME=null;
+    localStorage.removeItem('bms_token');
+    localStorage.removeItem('bms_me');
+
+    const authOpen = typeof AUTH_SCREEN !== 'undefined' &&
+      (AUTH_SCREEN==='register' || AUTH_SCREEN==='login');
+    if(!authOpen && typeof showGuestShop==='function') showGuestShop();
+
+    throw new Error('กรุณาเข้าสู่ระบบใหม่');
+  }
   const data=await res.json();
   if(!res.ok) throw new Error(data.error||'เกิดข้อผิดพลาด');
   return data;
@@ -26,6 +40,23 @@ function toast(msg,type='success'){
   const el=document.getElementById('toast');
   el.textContent=msg; el.className=`show ${type}`;
   clearTimeout(el._t); el._t=setTimeout(()=>el.classList.remove('show'),3200);
+}
+
+// ══ ป๊อปอัพแจ้งสำเร็จกลางจอ (ใช้กับ login/register) ═══════════════════
+// โชว์เครื่องหมายถูกพร้อมข้อความสั้น ๆ กลางจอ แล้วค่อยพาไปหน้าแอปให้อัตโนมัติ
+function showAuthSuccess(title, sub, proceedFn){
+  const overlay = document.getElementById('authSuccessModal');
+  const wrap    = document.getElementById('authSuccessCheckWrap');
+  document.getElementById('authSuccessTitle').textContent = title;
+  document.getElementById('authSuccessSub').textContent   = sub || '';
+  wrap.classList.remove('animate');
+  void wrap.offsetWidth; // reflow กันไม่ให้แอนิเมชันไม่รีสตาร์ท
+  wrap.classList.add('animate');
+  overlay.classList.add('open');
+  setTimeout(()=>{
+    overlay.classList.remove('open');
+    proceedFn();
+  }, 1300);
 }
 
 // ══ กันการกดปุ่มส่งฟอร์มซ้ำ (double-submit) ═══════════════════════════

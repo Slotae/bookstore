@@ -13,6 +13,7 @@ function renderUsers(){
       <td><span class="badge ${roleColor[u.Role]||'badge-gray'}">${esc(u.Role)}</span></td>
       <td><span class="badge ${u.IsActive?'badge-sage':'badge-rust'}">${u.IsActive?'ใช้งานอยู่':'ปิดใช้งาน'}</span></td>
       <td style="display:flex;gap:4px;flex-wrap:wrap">
+        <button class="btn-sm blue" onclick="editUser(${u.UserID})">แก้ไข</button>
         <button class="btn-sm ${u.IsActive?'rust':'sage'}" onclick="toggleUser(${u.UserID},${u.IsActive?0:1})">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${u.IsActive?'M18 6L6 18M6 6l12 12':'M20 6L9 17l-5-5'}"/></svg>
           ${u.IsActive?'ปิด':'เปิด'}
@@ -52,5 +53,24 @@ async function toggleUser(id,active){
   try{
     await api(`/api/users/${id}`,{method:'PATCH',body:JSON.stringify({isActive:active})});
     toast((active?'เปิด':'ปิด')+'ใช้งานสำเร็จ ✓'); await loadAll();
+  }catch(ex){toast(ex.message,'error')}
+}
+
+
+async function editUser(id){
+  const u=state.users.find(x=>x.UserID===id);
+  if(!u) return toast('ไม่พบผู้ใช้งาน','error');
+  const role=prompt('บทบาท: Admin / พนักงานขาย / พนักงานจัดส่ง / ลูกค้า',u.Role||'');
+  if(role===null)return;
+  const password=prompt('รหัสผ่านใหม่ (เว้นว่าง = ไม่เปลี่ยน)','');
+  if(password===null)return;
+  const payload={};
+  if(role.trim()!==u.Role) payload.role=role.trim();
+  if(password) payload.password=password;
+  if(!Object.keys(payload).length) return;
+  try{
+    await api(`/api/users/${id}`,{method:'PATCH',body:JSON.stringify(payload)});
+    toast('แก้ไขผู้ใช้งานสำเร็จ ✓');
+    const users=await api('/api/users'); state.users=users; renderUsers();
   }catch(ex){toast(ex.message,'error')}
 }

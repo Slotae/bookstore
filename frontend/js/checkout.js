@@ -158,9 +158,7 @@ async function doCheckout() {
         customerId: myCustomerID,
         items: cart.map(c => ({ isbn: c.isbn, quantity: c.quantity })),
         paymentMethod: checkoutMethod,
-        address,
-        orderDate: new Date().toISOString().slice(0,10),
-        shipDate: new Date().toISOString().slice(0,10)
+        address
       })
     });
 
@@ -247,7 +245,7 @@ function showOrderSuccessModal({ orderId, total, method, address, cardLast4, sli
   } else if (method === 'ปลายทาง') {
     noteHtml = '<div class="order-success-note blue">เตรียมเงินสดไว้รับสินค้าจากพนักงานจัดส่งได้เลย</div>';
   } else if (method === 'บัตร') {
-    noteHtml = '<div class="order-success-note sage">ทำรายการชำระเงินด้วยบัตรสำเร็จแล้ว ✓</div>';
+    noteHtml = '<div class="order-success-note amber">บันทึกคำสั่งซื้อด้วยบัตรแล้ว — รอเจ้าหน้าที่ตรวจสอบและยืนยันการชำระเงิน</div>';
   }
 
   document.getElementById('orderSuccessSummary').innerHTML =

@@ -37,9 +37,12 @@ function renderCustomers(){
       <td>${esc(c.Phone)}<small>${esc(c.Email)||'—'}</small></td>
       <td><strong>${c.OrderCount}</strong> ครั้ง<small>${money.format(c.TotalSpent||0)}</small></td>
       <td>${c.HasAccount?'<span class="badge badge-sage">มีบัญชี</span>':'<span class="badge badge-gray">—</span>'}</td>
-      <td><button class="btn-sm rust" onclick="deleteCustomer(${c.CustomerID},'${encodeURIComponent(c.CustomerName)}')">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>ลบ
-      </button></td>
+      <td style="display:flex;gap:4px;flex-wrap:wrap">
+        <button class="btn-sm blue" onclick="editCustomer(${c.CustomerID})">แก้ไข</button>
+        <button class="btn-sm rust" onclick="deleteCustomer(${c.CustomerID},'${encodeURIComponent(c.CustomerName)}')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>ลบ
+        </button>
+      </td>
     </tr>`).join('')}</tbody></table>
     <div style="padding:8px 4px;font-size:12px;color:var(--muted)">พบ ${rows.length} จาก ${state.customers.length} คน</div>`;
 }
@@ -70,5 +73,19 @@ async function deleteCustomer(id, name){
   try{
     await api(`/api/customers/${id}`,{method:'DELETE'});
     toast('ลบลูกค้าสำเร็จ ✓'); await loadAll();
+  }catch(ex){toast(ex.message,'error')}
+}
+
+
+async function editCustomer(id){
+  const c=state.customers.find(x=>x.CustomerID===id);
+  if(!c) return toast('ไม่พบข้อมูลลูกค้า','error');
+  const customerName=prompt('ชื่อลูกค้า',c.CustomerName||''); if(customerName===null)return;
+  const phone=prompt('เบอร์โทรศัพท์',c.Phone||''); if(phone===null)return;
+  const email=prompt('อีเมล (เว้นว่างได้)',c.Email||''); if(email===null)return;
+  const address=prompt('ที่อยู่',c.Address||''); if(address===null)return;
+  try{
+    await api(`/api/customers/${id}`,{method:'PUT',body:JSON.stringify({customerName,phone,email,address})});
+    toast('แก้ไขข้อมูลลูกค้าสำเร็จ ✓'); await loadAll();
   }catch(ex){toast(ex.message,'error')}
 }

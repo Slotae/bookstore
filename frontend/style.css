@@ -132,6 +132,39 @@ body{
   transition:border-color .15s,box-shadow .15s;
 }
 .auth-card input:focus,.auth-card select:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(162,121,31,.15)}
+
+/* ── password show/hide toggle ── */
+.pw-wrap{position:relative}
+.pw-wrap input{padding-right:42px}
+.pw-toggle{
+  position:absolute;right:6px;top:50%;transform:translateY(-50%);
+  background:none;border:none;cursor:pointer;color:var(--muted);
+  padding:6px;display:flex;border-radius:8px;transition:color .15s,background .15s;
+}
+.pw-toggle:hover{color:var(--wine);background:rgba(138,15,40,.08)}
+.pw-toggle svg{width:18px;height:18px}
+.pw-toggle.showing svg{color:var(--wine)}
+
+/* ── register step wizard ── */
+.auth-steps{display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:8px}
+.auth-step-dot{
+  width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:12px;font-weight:700;color:var(--muted);background:#fff;
+  border:1.5px solid var(--border);transition:all .2s;
+}
+.auth-step-dot.active{background:var(--wine);border-color:var(--wine);color:#fff;box-shadow:0 3px 10px rgba(138,15,40,.3)}
+.auth-step-dot.done{background:var(--sage);border-color:var(--sage);color:#fff}
+.auth-step-line{width:44px;height:2px;background:var(--border);transition:background .2s}
+.auth-step-line.done{background:var(--sage)}
+.auth-step-label{text-align:center;font-size:12.5px;color:var(--muted);font-weight:600;margin-bottom:22px}
+.auth-step-panel{display:none}
+.auth-step-panel.active{display:block;animation:auth-in .3s ease}
+.auth-field-hint{font-size:12px;margin:-8px 0 13px;font-weight:600;transition:color .15s}
+.auth-field-hint.ok{color:var(--sage)}
+.auth-field-hint.bad{color:var(--rust)}
+/* ป๊อปอัพสำเร็จของ login/register ต้องอยู่เหนือ .screen (login/register, z-index:9999) เสมอ
+   ไม่งั้นจะโผล่ "หลัง" หน้า login/register ที่ยังไม่ทันซ่อน มองไม่เห็นเลย */
+#authSuccessModal{z-index:10000}
 .btn-auth{
   width:100%;background:linear-gradient(160deg,var(--wine-2),var(--wine));color:#fff;border:none;
   border-radius:var(--r-sm);padding:15px;font-family:inherit;font-size:16px;font-weight:700;cursor:pointer;

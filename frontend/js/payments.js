@@ -110,20 +110,6 @@ function fillSlipForm(){
 
 // ══ FORMS ═══════════════════════════════════════════════════════════
 
-async function updateShipment(){
-  const err=document.getElementById('shipError'); err.textContent='';
-  const id=Number(document.getElementById('shipSelect').value);
-  if(!id){err.textContent='กรุณาเลือกรายการจัดส่ง';return}
-  try{
-    await api(`/api/shipments/${id}`,{method:'PATCH',body:JSON.stringify({
-      status:document.getElementById('shipStatus').value,
-      trackingNo:document.getElementById('shipTracking').value||null,
-      shippingCompany:document.getElementById('shipCompany').value||null
-    })});
-    toast('อัปเดตสถานะสำเร็จ ✓'); await loadAll();
-  }catch(ex){err.textContent=ex.message}
-}
-
 // [FIX] จำกัดขนาดไฟล์สลิปฝั่ง frontend ก่อนอ่าน/ส่งขึ้น server — ค่าคงที่ SLIP_MAX_BYTES
 // ย้ายไปประกาศรวมไว้ที่ core.js แล้ว (โหลดก่อนไฟล์นี้เสมอ) เพื่อให้ทุกจุดอัปโหลดสลิปใช้ค่าเดียวกัน
 

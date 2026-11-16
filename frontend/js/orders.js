@@ -109,7 +109,7 @@ let _orderItemCount = 0;
 function fillOrderForm(){
   const custOpts=state.customers.map(c=>`<option value="${c.CustomerID}">${esc(c.CustomerName)}</option>`).join('');
   document.getElementById('orderCustomer').innerHTML='<option value="">— เลือกลูกค้า —</option>'+custOpts;
-  document.querySelector('[name=orderDate]').value=new Date().toISOString().slice(0,10);
+  document.querySelector('[name=orderDate]').value=bangkokToday();
   // รีเซ็ต rows แล้วเพิ่มแถวแรก
   _orderItemCount = 0;
   document.getElementById('orderItems').innerHTML = '';
